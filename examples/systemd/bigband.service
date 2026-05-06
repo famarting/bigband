@@ -1,0 +1,17 @@
+[Unit]
+Description=bigband — scheduled Claude Code task runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/bigband daemon
+Restart=on-failure
+RestartSec=5
+
+# bigband writes its own log to ~/.bigband-tasks/daemon.log; journald gets a copy too.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
