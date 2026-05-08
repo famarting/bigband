@@ -44,9 +44,9 @@ func Slugify(s string) string {
 
 // Config is the top-level config file structure.
 type Config struct {
-	Defaults  Defaults  `yaml:"defaults"`
-	Templates []*Task   `yaml:"templates,omitempty"`
-	Tasks     []*Task   `yaml:"tasks"`
+	Defaults  Defaults `yaml:"defaults"`
+	Templates []*Task  `yaml:"templates,omitempty"`
+	Tasks     []*Task  `yaml:"tasks"`
 }
 
 // Defaults holds cluster-level defaults.
@@ -86,14 +86,15 @@ type Task struct {
 // IsOneOff returns true when the task has no schedule and fires exactly once.
 func (t *Task) IsOneOff() bool { return t.Schedule == "" }
 
-// ShouldKeepWorktree returns true when the worktree must be preserved after
-// the run. Defaults to true for one-off tasks and any task with reuse_worktree
-// (you must keep it to be able to reuse it next run).
+// ShouldKeepWorktree returns true when the worktree should be preserved after
+// the run. Defaults to true — the worktree stays for inspection until the next
+// run starts, at which point CreateOrReplace discards it and creates a fresh
+// snapshot of HEAD. Set keep_worktree: false to remove it at run end instead.
 func (t *Task) ShouldKeepWorktree() bool {
 	if t.KeepWorktree != nil {
 		return *t.KeepWorktree
 	}
-	return t.IsOneOff() || t.ShouldReuseWorktree()
+	return true || t.ShouldReuseWorktree()
 }
 
 // ShouldReuseWorktree returns true when an existing worktree should be reused

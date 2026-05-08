@@ -98,12 +98,9 @@ tasks:
     model: claude-sonnet-4-6        # override model for this task
     prompt: Update the changelog based on commits since yesterday.
     extra_claude_flags: ["--allowedTools", "Read,Write,Bash"]
-    keep_worktree: false
-
   - name: one-off-refactor
     # no schedule — fires once immediately, then stays in state
     folder: /path/to/repo
-    keep_worktree: true             # keep worktree so you can resume
     reuse_worktree: true            # pick up where Claude left off
     prompt: Refactor the auth module to use the new middleware pattern.
 ```
@@ -124,8 +121,8 @@ tasks:
 | `pre_exec` | `[]` | Shell commands run before Claude |
 | `post_exec` | `[]` | Shell commands run after Claude |
 | `extra_claude_flags` | `[]` | Extra flags appended to the `claude` invocation |
-| `keep_worktree` | `false` (`true` for one-off / reuse) | Preserve worktree after the run |
-| `reuse_worktree` | `false` | Reuse existing worktree across runs (implies keep) |
+| `keep_worktree` | `true` | Keep worktree after the run for inspection; it is discarded at the start of the next run. Set `false` to remove it immediately after each run. |
+| `reuse_worktree` | `false` | Reuse the existing worktree as-is across runs (skip discard + recreate at run start) |
 
 ### Defaults fields
 
@@ -258,7 +255,7 @@ To survive logout, enable lingering: `loginctl enable-linger $USER`.
 
 ## Worktrees
 
-When `folder` is inside a git repo, bigband creates a git worktree for each run on a dedicated branch (`bigband/<task-name>`). This isolates Claude's changes from the main working tree. After the run the worktree is removed (unless `keep_worktree: true`).
+When `folder` is inside a git repo, bigband creates a git worktree for each run on a dedicated branch (`bigband/<task-name>`). This isolates Claude's changes from the main working tree. By default the worktree is kept after the run so you can inspect it — it is discarded and recreated fresh at the start of the next run. Set `keep_worktree: false` to remove it immediately after each run.
 
 With `reuse_worktree: true`, the same worktree persists across runs. Use `bigband resume <task>` to open an interactive Claude session in that worktree, picking up from the last recorded session ID.
 

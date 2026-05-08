@@ -33,9 +33,8 @@ func printTaskList(reply *ipc.Reply) error {
 	if err := json.Unmarshal(reply.Payload, &payload); err != nil {
 		return err
 	}
-	fmt.Printf("bigband daemon  uptime: %s\n\n", payload.Uptime)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN")
+	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN\tWORKTREE")
 	for _, t := range payload.Tasks {
 		sched := t.Schedule
 		if sched == "" {
@@ -45,7 +44,11 @@ func printTaskList(reply *ipc.Reply) error {
 		if !t.Enabled {
 			enabled = "no"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, sched, enabled, t.NextRun)
+		wt := "-"
+		if t.WorktreePath != "" {
+			wt = t.WorktreePath
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.Name, sched, enabled, t.NextRun, wt)
 	}
 	return w.Flush()
 }
@@ -57,7 +60,7 @@ func printOfflineTaskList() error {
 	}
 	st, _ := state.Load()
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN")
+	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN\tWORKTREE")
 	for _, t := range cfg.Tasks {
 		enabled := "yes"
 		if !t.IsEnabled() {
@@ -65,16 +68,20 @@ func printOfflineTaskList() error {
 		}
 		sched := t.Schedule
 		nextRun := "-"
+		ts := st.Get(t.Name)
 		if t.IsOneOff() {
 			sched = "one-off"
-			ts := st.Get(t.Name)
 			if ts.LastRun == nil {
 				nextRun = "pending"
 			} else {
 				nextRun = "done"
 			}
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, sched, enabled, nextRun)
+		wt := "-"
+		if ts.WorktreePath != "" {
+			wt = ts.WorktreePath
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.Name, sched, enabled, nextRun, wt)
 	}
 	return w.Flush()
 }

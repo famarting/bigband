@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -43,8 +44,13 @@ type runEntry struct {
 }
 
 func printHistory(limit int, onlyRunning bool) error {
-	if reply, err := ipc.Send(ipc.Cmd{Action: "ping"}); err == nil && reply.OK {
-		fmt.Println("daemon: running")
+	if reply, err := ipc.Send(ipc.Cmd{Action: "status"}); err == nil && reply.OK {
+		var payload ipc.StatusPayload
+		if json.Unmarshal(reply.Payload, &payload) == nil {
+			fmt.Printf("daemon: running  uptime: %s\n", payload.Uptime)
+		} else {
+			fmt.Println("daemon: running")
+		}
 	} else {
 		fmt.Println("daemon: not running")
 	}

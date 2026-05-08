@@ -58,8 +58,8 @@ func (s *Scheduler) Reload(cfg *config.Config) {
 			if !s.oneOffFired[task.Name] && !s.hasFired(task.Name) {
 				s.oneOffFired[task.Name] = true
 				c, t := cfg, task
-				go s.handler(c, t)
 				log.Printf("bigband: firing one-off task %q immediately", task.Name)
+				s.handler(c, t)
 			}
 			continue
 		}
@@ -75,7 +75,8 @@ func (s *Scheduler) Reload(cfg *config.Config) {
 		t := task // capture
 		c := cfg  // capture
 		id, err := s.c.AddFunc(task.CronExpr(), func() {
-			go s.handler(c, t)
+			log.Printf("bigband: running scheduled task %q", t.Name)
+			s.handler(c, t)
 		})
 		if err != nil {
 			log.Printf("bigband: scheduling task %q failed: %v", task.Name, err)

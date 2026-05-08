@@ -32,7 +32,7 @@ func resumeTask(name string) error {
 	ts := st.Get(name)
 
 	if ts.WorktreePath == "" {
-		return fmt.Errorf("task %q has no tracked worktree — run the task first, or use keep_worktree/reuse_worktree", name)
+		return fmt.Errorf("task %q has no tracked worktree — run the task first (or check that keep_worktree is not false)", name)
 	}
 	if _, err := os.Stat(ts.WorktreePath); err != nil {
 		return fmt.Errorf("worktree %s no longer exists on disk — use 'bigband worktree rm %s' to clear the stale reference", ts.WorktreePath, name)

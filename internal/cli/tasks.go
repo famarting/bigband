@@ -142,8 +142,6 @@ func addTaskWizard(seed *config.Task) error {
 	}
 	if !isOneOff {
 		task["schedule"] = sched
-	} else {
-		task["keep_worktree"] = true
 	}
 	if len(preExec) > 0 {
 		task["pre_exec"] = preExec
@@ -167,6 +165,39 @@ func addTaskWizard(seed *config.Task) error {
 		if len(seed.ExtraClaudeFlags) > 0 {
 			task["extra_claude_flags"] = seed.ExtraClaudeFlags
 		}
+	}
+
+	fmt.Println()
+	fmt.Println("Task to create:")
+	fmt.Printf("  name:     %s\n", name)
+	if !isOneOff {
+		fmt.Printf("  schedule: %s\n", sched)
+	} else {
+		fmt.Printf("  schedule: (one-off, fires immediately)\n")
+	}
+	fmt.Printf("  folder:   %s\n", folder)
+	promptPreview := strings.TrimSpace(prompt)
+	if nl := strings.IndexByte(promptPreview, '\n'); nl >= 0 {
+		promptPreview = promptPreview[:nl] + " …"
+	} else if len(promptPreview) > 80 {
+		promptPreview = promptPreview[:80] + " …"
+	}
+	fmt.Printf("  prompt:   %s\n", promptPreview)
+	if len(preExec) > 0 {
+		fmt.Printf("  pre_exec: %v\n", preExec)
+	}
+	if len(postExec) > 0 {
+		fmt.Printf("  post_exec: %v\n", postExec)
+	}
+	fmt.Println()
+
+	ok, err := askConfirm(r, "Create this task?")
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Println("Aborted.")
+		return nil
 	}
 
 	if err := appendTask(task); err != nil {

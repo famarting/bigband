@@ -34,7 +34,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		select {
 		case <-time.After(sleep):
 		case <-ctx.Done():
-			fmt.Fprintf(out, "[%s] cancelled during jitter sleep\n", task.Name)
+			log.Printf("bigband: task %q cancelled during jitter sleep — not started", task.Name)
 			return
 		}
 	}
@@ -127,9 +127,12 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		}
 		if err != nil {
 			logger.Printf("claude failed: %v", err)
-			if strings.Contains(err.Error(), "context deadline exceeded") {
+			switch {
+			case ctx.Err() != nil:
+				status = state.StatusStopped
+			case strings.Contains(err.Error(), "context deadline exceeded"):
 				status = state.StatusTimeout
-			} else {
+			default:
 				status = state.StatusFailed
 			}
 		}

@@ -42,6 +42,7 @@ type TaskStatus struct {
 	LastStatus   string `json:"last_status,omitempty"`
 	LastDuration string `json:"last_duration,omitempty"`
 	LastLog      string `json:"last_log,omitempty"`
+	WorktreePath string `json:"worktree_path,omitempty"`
 }
 
 // Send opens a connection to the daemon and sends cmd, returning the reply.

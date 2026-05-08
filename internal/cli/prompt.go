@@ -79,6 +79,18 @@ func validateUniqueName(name string) error {
 	return nil
 }
 
+// askConfirm prints prompt and returns true if the user answers y/Y/yes or
+// just presses enter (default yes). Any other input returns false.
+func askConfirm(r *bufio.Reader, prompt string) (bool, error) {
+	fmt.Print(prompt + " [Y/n]: ")
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return false, err
+	}
+	ans := strings.ToLower(strings.TrimSpace(line))
+	return ans == "" || ans == "y" || ans == "yes", nil
+}
+
 func newReader() *bufio.Reader {
 	return bufio.NewReader(os.Stdin)
 }

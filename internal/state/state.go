@@ -20,6 +20,7 @@ const (
 	StatusPreFailed RunStatus = "pre_failed"
 	StatusSkipped   RunStatus = "skipped"
 	StatusRunning   RunStatus = "running"
+	StatusStopped   RunStatus = "stopped" // cancelled by daemon shutdown
 	StatusUnknown   RunStatus = "unknown" // orphan exited without tracking
 )
 

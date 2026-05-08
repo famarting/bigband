@@ -66,8 +66,11 @@ func Run() error {
 
 	started := time.Now()
 
-	var cancelsMu sync.Mutex
-	cancels := map[string]context.CancelFunc{}
+	var (
+		wg        sync.WaitGroup
+		cancelsMu sync.Mutex
+		cancels   = map[string]context.CancelFunc{}
+	)
 
 	runTask := func(c *config.Config, t *config.Task) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -83,6 +86,17 @@ func Run() error {
 		runner.Run(ctx, c, t, st, io.Discard)
 	}
 
+	// launchTask spawns runTask in a goroutine tracked by the WaitGroup so that
+	// graceful shutdown can wait for in-flight tasks to finish. The scheduler and
+	// IPC "run" handler both call this instead of go+runTask directly.
+	launchTask := func(c *config.Config, t *config.Task) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runTask(c, t)
+		}()
+	}
+
 	stopTask := func(name string) bool {
 		cancelsMu.Lock()
 		cancel, ok := cancels[name]
@@ -93,9 +107,7 @@ func Run() error {
 		return ok
 	}
 
-	sched := scheduler.New(func(c *config.Config, t *config.Task) {
-		runTask(c, t)
-	}, func(name string) bool {
+	sched := scheduler.New(launchTask, func(name string) bool {
 		return st.Get(name).LastRun != nil
 	})
 	sched.Reload(cfg)
@@ -117,7 +129,7 @@ func Run() error {
 		if err := json.NewDecoder(conn).Decode(&cmd); err != nil {
 			return
 		}
-		reply := handleCmd(cmd, cfg, sched, st, started, runTask, stopTask)
+		reply := handleCmd(cmd, cfg, sched, st, started, launchTask, stopTask)
 		json.NewEncoder(conn).Encode(reply) //nolint:errcheck
 	})
 	if err != nil {
@@ -132,6 +144,26 @@ func Run() error {
 	<-sig
 	log.Println("bigband daemon stopping")
 	sched.Stop()
+
+	// Cancel all in-flight tasks, then wait up to the grace period for them to
+	// finish. killProcessGroupOnCancel sends SIGTERM to each subprocess group;
+	// WaitDelay in the runner escalates to SIGKILL after 5 s, so tasks that
+	// ignore SIGTERM are still collected well within the 30 s window.
+	cancelsMu.Lock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+	cancelsMu.Unlock()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	const grace = 30 * time.Second
+	select {
+	case <-done:
+	case <-time.After(grace):
+		log.Printf("bigband: grace period (%s) exceeded, some tasks may not have finished cleanly", grace)
+	}
 	return nil
 }
 
@@ -169,6 +201,7 @@ func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *
 				LastStatus:   string(ts.LastStatus),
 				LastDuration: ts.LastDuration,
 				LastLog:      ts.LastLog,
+				WorktreePath: ts.WorktreePath,
 			})
 		}
 		payload := ipc.StatusPayload{
@@ -184,7 +217,7 @@ func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *
 			return ipc.Reply{OK: false, Error: "unknown task: " + cmd.Task}
 		}
 		t.ClearJitter() // Don't apply jitter to manual runs.
-		go runTask(cfg, t)
+		runTask(cfg, t)
 		return ipc.Reply{OK: true}
 
 	case "stop":
