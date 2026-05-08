@@ -97,7 +97,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		timeout := cfg.EffectiveTimeout(task)
 		deadline := time.Now().Add(timeout)
 
-		sessionID, wakeup, err := runClaude(ctx, flags, task.Prompt, "", runDir, w, timeout)
+		sessionID, wakeup, err := runClaude(ctx, flags, task.Prompt, "", runDir, lf, out, timeout)
 		for wakeup != nil && err == nil {
 			if sessionID != "" {
 				if err2 := st.SetSessionID(task.Name, sessionID); err2 != nil {
@@ -117,7 +117,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 			logger.Printf("claude scheduled wakeup in %s — sleeping before resuming session %s", delay.Round(time.Second), sessionID)
 			time.Sleep(delay)
 			remaining = time.Until(deadline)
-			sessionID, wakeup, err = runClaude(ctx, flags, resumePrompt, sessionID, runDir, w, remaining)
+			sessionID, wakeup, err = runClaude(ctx, flags, resumePrompt, sessionID, runDir, lf, out, remaining)
 		}
 
 		if sessionID != "" {
@@ -274,7 +274,7 @@ func runShellWithEnv(ctx context.Context, cfg *config.Config, cmd, dir string, w
 	return c.Run()
 }
 
-func runClaude(ctx context.Context, flags []string, prompt, resumeSessionID, dir string, w io.Writer, timeout time.Duration) (sessionID string, wakeup *WakeupRequest, err error) {
+func runClaude(ctx context.Context, flags []string, prompt, resumeSessionID, dir string, log, live io.Writer, timeout time.Duration) (sessionID string, wakeup *WakeupRequest, err error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var args []string
@@ -285,17 +285,32 @@ func runClaude(ctx context.Context, flags []string, prompt, resumeSessionID, dir
 	}
 	c := exec.CommandContext(ctx, "claude", args...)
 	c.Dir = dir
-	// Parse stream-json output: raw NDJSON is discarded, formatted activity
-	// goes to w (log file + optional live terminal).
-	sw := newStreamWriter(io.Discard, w)
+	// Parse stream-json output: raw NDJSON is discarded, plain rendering goes
+	// to the log file, colorized rendering to the live writer when it's a TTY.
+	sw := newStreamWriter(io.Discard, log, live, isTerminal(live))
 	c.Stdout = sw
-	c.Stderr = w
+	c.Stderr = io.MultiWriter(log, live)
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	killProcessGroupOnCancel(c)
 	err = c.Run()
 	_, sessionID = sw.getResult()
 	wakeup = sw.getWakeup()
 	return sessionID, wakeup, err
+}
+
+// isTerminal returns true when w is an *os.File backed by a character device
+// (i.e. a TTY rather than a pipe or regular file). Used to decide whether to
+// emit ANSI color escapes.
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // killProcessGroupOnCancel arranges for context cancellation (timeout or stop)

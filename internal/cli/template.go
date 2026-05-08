@@ -426,6 +426,11 @@ func saveTaskAsTemplate(taskName, tmplName string) error {
 	if src == nil {
 		return fmt.Errorf("task %q not found", taskName)
 	}
+	for _, t := range tasks {
+		if m, ok := t.(map[string]any); ok && m["name"] == tmplName {
+			return fmt.Errorf("a task named %q already exists; pass --as <name> to use a different template name", tmplName)
+		}
+	}
 
 	// Copy fields except name (renamed) and schedule (templates strip schedule
 	// to avoid surprise scheduling on instantiation; user can opt back in).

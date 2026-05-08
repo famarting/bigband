@@ -128,6 +128,22 @@ func Load(path string) (*Config, error) {
 	return parse(data)
 }
 
+// LoadUnvalidated parses the config without running Validate. It's used by
+// shell-completion functions, which only need the list of names and shouldn't
+// silently disappear when an unrelated validation error breaks Load.
+func LoadUnvalidated(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading config: %w", err)
+	}
+	cfg := &Config{}
+	cfg.Defaults = defaultDefaults()
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	return cfg, nil
+}
+
 func parse(data []byte) (*Config, error) {
 	cfg := &Config{}
 	cfg.Defaults = defaultDefaults()

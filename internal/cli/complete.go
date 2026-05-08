@@ -9,9 +9,11 @@ import (
 // completeTaskNames is a ValidArgsFunction that completes configured task names.
 func completeTaskNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) > 0 {
-		return nil, cobra.ShellCompDirectiveNoFileComp
+		// Beyond the name position, fall through to default (file) completion
+		// so commands like `worktree move <task> <dest>` can complete paths.
+		return nil, cobra.ShellCompDirectiveDefault
 	}
-	cfg, err := config.Load(paths.Config())
+	cfg, err := config.LoadUnvalidated(paths.Config())
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
@@ -25,9 +27,11 @@ func completeTaskNames(cmd *cobra.Command, args []string, toComplete string) ([]
 // completeTemplateNames completes configured template names.
 func completeTemplateNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) > 0 {
-		return nil, cobra.ShellCompDirectiveNoFileComp
+		// Beyond the name position, fall through to default (file) completion
+		// so commands like `worktree move <task> <dest>` can complete paths.
+		return nil, cobra.ShellCompDirectiveDefault
 	}
-	cfg, err := config.Load(paths.Config())
+	cfg, err := config.LoadUnvalidated(paths.Config())
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
@@ -41,9 +45,11 @@ func completeTemplateNames(cmd *cobra.Command, args []string, toComplete string)
 // completeTaskOrTemplateNames completes both task and template names.
 func completeTaskOrTemplateNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) > 0 {
-		return nil, cobra.ShellCompDirectiveNoFileComp
+		// Beyond the name position, fall through to default (file) completion
+		// so commands like `worktree move <task> <dest>` can complete paths.
+		return nil, cobra.ShellCompDirectiveDefault
 	}
-	cfg, err := config.Load(paths.Config())
+	cfg, err := config.LoadUnvalidated(paths.Config())
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

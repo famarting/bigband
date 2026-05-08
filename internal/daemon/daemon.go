@@ -137,7 +137,18 @@ func Run() error {
 	}
 	defer stopIPC()
 
-	log.Printf("bigband daemon ready, %d tasks scheduled", len(cfg.Tasks))
+	var scheduled, oneOff, disabled int
+	for _, t := range cfg.Tasks {
+		switch {
+		case !t.IsEnabled():
+			disabled++
+		case t.IsOneOff():
+			oneOff++
+		default:
+			scheduled++
+		}
+	}
+	log.Printf("bigband daemon ready, %d scheduled, %d one-off, %d disabled", scheduled, oneOff, disabled)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
