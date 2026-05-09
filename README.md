@@ -61,14 +61,15 @@ Override location: `BIGBAND_HOME` environment variable.
 
 ```yaml
 defaults:
-  shell: /bin/sh          # shell for pre/post_exec
-  timeout: 45m            # max Claude runtime per task
-  retain_logs: 50         # log files to keep per task
-  jitter: 15m             # random delay applied when ~ is in schedule
-  model: claude-opus-4-7  # Claude model used by all tasks (optional)
-  effort: high            # thinking effort level: low, medium, high (optional)
-  folder: /path/to/repo   # default folder used by `bigband add` wizard
-  pre_exec:               # default pre_exec used by `bigband add` wizard
+  shell: /bin/sh                # shell for pre/post_exec
+  timeout: 45m                  # max Claude runtime per task
+  retain_logs: 50               # log files to keep per task
+  jitter: 15m                   # random delay applied when ~ is in schedule
+  ephemeral_retention: 168h     # auto-prune ephemeral one-off state + logs
+  model: claude-opus-4-7        # Claude model used by all tasks (optional)
+  effort: high                  # thinking effort level: low, medium, high (optional)
+  folder: /path/to/repo         # default folder used by `bigband add` wizard
+  pre_exec:                     # default pre_exec used by `bigband add` wizard
     - git fetch --all
 
 templates:
@@ -121,6 +122,7 @@ tasks:
 | `pre_exec` | `[]` | Shell commands run before Claude |
 | `post_exec` | `[]` | Shell commands run after Claude |
 | `extra_claude_flags` | `[]` | Extra flags appended to the `claude` invocation |
+| `worktree` | `true` | Master switch: when `false`, Claude runs directly in `folder` and `keep_worktree`/`reuse_worktree` are ignored. |
 | `keep_worktree` | `true` | Keep worktree after the run for inspection; it is discarded at the start of the next run. Set `false` to remove it immediately after each run. |
 | `reuse_worktree` | `false` | Reuse the existing worktree as-is across runs (skip discard + recreate at run start) |
 
@@ -132,6 +134,7 @@ tasks:
 | `timeout` | `45m` | Default per-task max runtime |
 | `retain_logs` | `50` | Log files kept per task |
 | `jitter` | `15m` | Default jitter window when `~` is in a schedule |
+| `ephemeral_retention` | `168h` | How long IPC-submitted one-off state + logs are kept before auto-prune; configured tasks are never touched. Set to `0s` to disable. |
 | `model` | — | Claude model applied to all tasks (e.g. `claude-opus-4-7`). Omit to let Claude use its own default. |
 | `effort` | — | Thinking effort level applied to all tasks (`low`, `medium`, `high`). Omit to let Claude use its own default. |
 | `folder` | — | Default folder seeded by `bigband add` |
@@ -175,10 +178,12 @@ bigband validate
 
 | Variable | Value |
 |---|---|
-| `BIGBAND_STATUS` | `ok`, `failed`, `timeout`, `pre_failed` |
+| `BIGBAND_STATUS` | `ok`, `failed`, `timeout`, `pre_failed`, `stopped`, `unknown` |
 | `BIGBAND_TASK` | Task name |
 | `BIGBAND_LOG` | Absolute path to this run's log file |
 | `BIGBAND_WORKTREE` | Worktree path (empty if none) |
+| `BIGBAND_REPLY_FILE` | Path to a sidecar file holding Claude's final assistant message (empty if the run produced no text — e.g. ended on a tool call) |
+| `BIGBAND_SESSION_ID` | Claude session id captured during the run; pass to `claude --resume <id>` to continue |
 
 ## Commands
 
@@ -221,11 +226,16 @@ bigband validate
 | Command | Description |
 |---|---|
 | `bigband run <name>` | Fire a task immediately (bypasses schedule and jitter). Falls back to inline execution if the daemon is not running. |
+| `bigband submit --folder <dir> --prompt "..."` | Submit a one-off ephemeral run via IPC (no `config.yaml` edit). Returns a run id immediately. |
+| `bigband followup <task> "<prompt>"` | Resume the task's last Claude session with a new prompt (sugar around `submit --parent-session-id`). |
 | `bigband stop <name>` | Stop a currently running task |
 | `bigband logs <name>` | Print the latest run log |
 | `bigband logs <name> -f` | Tail the latest run in real time |
 | `bigband logs <name> -l [-n N]` | List the most recent N runs (default 10) |
 | `bigband resume <name>` | Resume the Claude session in the task's worktree (interactive) |
+| `bigband events [-f] [-n N]` | Print or tail `~/.bigband-tasks/events.jsonl` (the durable lifecycle event stream) |
+| `bigband subscribe [--types ...] [--tasks ...] [--since <ts>]` | Open a long-lived stream of lifecycle events; `--since` replays from `events.jsonl` |
+| `bigband subscribers` | List integrations currently attached to the daemon's event bus |
 
 ### Config
 
@@ -234,6 +244,7 @@ bigband validate
 | `bigband validate [path]` | Parse and validate the config file (default: `~/.bigband-tasks/config.yaml`) |
 | `bigband config path` | Print the config file path |
 | `bigband config edit` | Open the config file in `$EDITOR` |
+| `bigband prune [--older-than <dur>] [--keep-logs] [--dry-run]` | Drop ephemeral one-off state (and logs) older than the cutoff. Configured tasks are never touched. |
 
 ## Running on Linux
 
@@ -263,11 +274,42 @@ With `reuse_worktree: true`, the same worktree persists across runs. Use `bigban
 
 - Daemon log: `~/.bigband-tasks/daemon.log`
 - Task logs: `~/.bigband-tasks/logs/<task>/<timestamp>.log`
+- Reply sidecar: `~/.bigband-tasks/logs/<task>/<timestamp>.reply.txt` (Claude's final assistant message)
 - Latest symlink: `~/.bigband-tasks/logs/<task>/latest.log`
+- Events stream: `~/.bigband-tasks/events.jsonl` (durable, structured; one line per lifecycle event)
 
-Log rotation keeps the `retain_logs` most recent files (default 50).
+Log rotation keeps the `retain_logs` most recent files per task (default 50). Ephemeral one-off state and logs are auto-pruned per `defaults.ephemeral_retention` (default 7 days).
 
-## Security note
+## Extending bigband
+
+bigband is a focused orchestrator. Anything you'd build on top — Slack mirroring, GitHub comment triggers, webhook posts, custom dashboards — lives in **separate processes** that talk to bigband through documented contracts: IPC, events, on-disk state, and a manifest the daemon uses to spawn and supervise the process.
+
+You install bigband once via `bigband install`. Each extension is a directory under `~/.bigband-tasks/extensions/<name>/` with a `manifest.yaml`; the daemon discovers and supervises it automatically (no per-extension LaunchAgent).
+
+- **[`docs/MANIFESTS.md`](docs/MANIFESTS.md)** — manifest schema, the supervisor's restart policies, and the `bigband ext` CLI.
+- **[`EXTENDING.md`](EXTENDING.md)** — reference for the IPC, events, and state/logs contracts.
+- **[`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md)** — 30-minute walkthrough that builds a webhook integration in ~50 lines using the public Go SDK at [`pkg/bigbandext/`](pkg/bigbandext).
+- **[`docs/EVENTS.md`](docs/EVENTS.md)** — every lifecycle event type and its payload schema.
+- **[`cmd/bigband-slack/`](cmd/bigband-slack/README.md)** — production-grade reference integration: Slack socket-mode bot, supervised via manifest.
+- **[`examples/extensions/notify-sh/`](examples/extensions/notify-sh/)** — ~80-line bash script that posts macOS notifications, also supervised via manifest.
+- **[`examples/extensions/echo-handler/`](examples/extensions/echo-handler/)** — minimal stdlib-only Go subscriber.
+
+## Trust model
+
+bigband is designed for a **single trusted local user**. The daemon, all integrations, and your Claude Code runs all execute under your UID and trust each other implicitly. There is no authentication on the IPC socket, no permission boundary between extensions, and no redaction of model output anywhere on disk.
+
+What this means in practice:
+
+- **The IPC socket** (`~/.bigband-tasks/daemon.sock`) sits inside a `chmod 700` directory, so other users on the box can't reach it. Any process running as **you** can submit_run, subscribe to events, fire tasks, or read history. Don't run bigband on a multi-user dev box where you don't trust everyone with your UID.
+- **`final_message` lives in plaintext on disk** in three places:
+  - `~/.bigband-tasks/logs/<task>/<ts>.log` — the per-run log (chmod 0600)
+  - `~/.bigband-tasks/logs/<task>/<ts>.reply.txt` — the captured Claude reply (chmod 0600)
+  - `~/.bigband-tasks/events.jsonl` — the durable event stream (chmod 0600)
+  
+  All three sit under the chmod-700 root. If a task asks Claude to handle a secret (an API key, a credential, a code snippet from a private repo), that content ends up in those files. The `subscribe` IPC stream (and `subscribe --since` replay) re-emits the same content to anyone who can reach the socket. If your threat model includes other processes on your machine reading your home directory, treat these files like credentials.
+- **Slack integration tokens**: bigband-slack reads tokens from the slack config (`file:/abs/path/token` references resolved from chmod-600 files are recommended) or from env vars interpolated by the manifest's `${env:NAME}` placeholders, which read from the daemon's process environment. Don't embed token literals in `manifest.yaml` itself — it's the same chmod-600 file but the manifest is meant to be reviewable / committable in dotfiles, the secrets file is not.
+
+### How bigband runs your tasks
 
 bigband runs commands and Claude Code with **your user's permissions**. Specifically:
 

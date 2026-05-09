@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/famarting/bigband/internal/config"
 	"github.com/famarting/bigband/internal/ipc"
 	"github.com/famarting/bigband/internal/paths"
 	"github.com/famarting/bigband/internal/state"
@@ -41,6 +42,15 @@ type runEntry struct {
 	Duration     string
 	Active       bool
 	WorktreePath string
+	Folder       string
+	// WorktreeMode reflects the task's current config, not necessarily the
+	// config at the time of the run. Tasks deleted from config show "".
+	WorktreeMode string
+}
+
+type taskInfo struct {
+	folder string
+	mode   string
 }
 
 func printHistory(limit int, onlyRunning bool) error {
@@ -57,7 +67,8 @@ func printHistory(limit int, onlyRunning bool) error {
 	fmt.Println()
 
 	st, _ := state.Load()
-	entries := collectRuns(st)
+	tasks := loadTaskInfo()
+	entries := collectRuns(st, tasks)
 
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Started.After(entries[j].Started)
@@ -81,7 +92,7 @@ func printHistory(limit int, onlyRunning bool) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "  TASK\tSTARTED\tSTATUS\tDURATION\tWORKTREE")
+	fmt.Fprintln(w, "  TASK\tSTARTED\tSTATUS\tDURATION\tRUN DIR")
 	for _, e := range entries {
 		marker := " "
 		if e.Active {
@@ -96,16 +107,27 @@ func printHistory(limit int, onlyRunning bool) error {
 				dur = "?"
 			}
 		}
-		wt := e.WorktreePath
-		if wt == "" {
-			wt = "-"
-		}
-		fmt.Fprintf(w, "%s %s\t%s\t%s\t%s\t%s\n", marker, e.Task, started, e.Status, dur, wt)
+		fmt.Fprintf(w, "%s %s\t%s\t%s\t%s\t%s\n", marker, e.Task, started, e.Status, dur, runDir(e.WorktreePath, e.Folder, e.WorktreeMode))
 	}
 	return w.Flush()
 }
 
-func collectRuns(st *state.State) []runEntry {
+// loadTaskInfo returns a map of task name → folder and worktree mode taken
+// from the current config, used to enrich historical run rows. Tasks removed
+// from config since the run will simply be missing from the map.
+func loadTaskInfo() map[string]taskInfo {
+	cfg, err := config.Load(paths.Config())
+	if err != nil {
+		return nil
+	}
+	m := make(map[string]taskInfo, len(cfg.Tasks))
+	for _, t := range cfg.Tasks {
+		m[t.Name] = taskInfo{folder: t.Folder, mode: t.WorktreeMode()}
+	}
+	return m
+}
+
+func collectRuns(st *state.State, tasks map[string]taskInfo) []runEntry {
 	logsDir := paths.LogsDir()
 	taskDirs, err := os.ReadDir(logsDir)
 	if err != nil {
@@ -160,6 +182,15 @@ func collectRuns(st *state.State) []runEntry {
 			if isLatest {
 				wt = ts.WorktreePath
 			}
+			info := tasks[taskName]
+			folder := info.folder
+			// Ephemeral one-offs (submit_run with ephemeral=true) aren't in
+			// config; recover their folder from state, which the runner
+			// records via SetRunning. Legacy state entries written before
+			// that fix will still show "-".
+			if folder == "" {
+				folder = ts.Folder
+			}
 			entries = append(entries, runEntry{
 				Task:         taskName,
 				Started:      started,
@@ -167,6 +198,8 @@ func collectRuns(st *state.State) []runEntry {
 				Duration:     duration,
 				Active:       active,
 				WorktreePath: wt,
+				Folder:       folder,
+				WorktreeMode: info.mode,
 			})
 		}
 	}

@@ -66,6 +66,11 @@ func CreateOrReplace(repoRoot, wtPath, taskName string, w io.Writer) error {
 // Remove removes the worktree at wtPath and its associated bigband branch.
 // It tries `git worktree remove --force` first; on failure it falls back to
 // os.RemoveAll + `git worktree prune`.
+//
+// The fallback `os.RemoveAll(wtPath)` is guarded: wtPath must be under
+// repoRoot's parent (where DefaultPath lives) and must look like a bigband
+// worktree (contains "-bb-" in its base name). A corrupted state.json or a
+// hand-edit cannot weaponise this path into deleting an unrelated directory.
 func Remove(repoRoot, wtPath string) error {
 	// Resolve the branch name before the worktree disappears.
 	branchOut, _ := exec.Command("git", "-C", wtPath, "rev-parse", "--abbrev-ref", "HEAD").Output()
@@ -73,6 +78,9 @@ func Remove(repoRoot, wtPath string) error {
 
 	cmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", "--force", wtPath)
 	if err := cmd.Run(); err != nil {
+		if guardErr := guardWorktreePath(repoRoot, wtPath); guardErr != nil {
+			return fmt.Errorf("refusing to recursively delete %s: %w", wtPath, guardErr)
+		}
 		if rmErr := os.RemoveAll(wtPath); rmErr != nil {
 			return fmt.Errorf("rm -rf %s: %w", wtPath, rmErr)
 		}
@@ -82,6 +90,53 @@ func Remove(repoRoot, wtPath string) error {
 	// Delete the branch if it's a bigband-managed one.
 	if strings.HasPrefix(branch, "bigband/") {
 		_ = exec.Command("git", "-C", repoRoot, "branch", "-D", branch).Run()
+	}
+	return nil
+}
+
+// LooksLikeBigbandWorktree returns true when wtPath's basename matches the
+// bigband worktree naming convention (<something>-bb-<something>). Used by
+// fallback cleanup paths that can't construct the full guardWorktreePath
+// invariants (e.g., when the parent repo root is unresolvable). Strictly
+// weaker than guardWorktreePath but safe enough to refuse pathological
+// state.json values like "/" or "/Users/me".
+func LooksLikeBigbandWorktree(wtPath string) bool {
+	abs, err := filepath.Abs(wtPath)
+	if err != nil || abs == "/" || abs == "" {
+		return false
+	}
+	base := filepath.Base(abs)
+	if base == "." || base == "/" {
+		return false
+	}
+	return strings.Contains(base, "-bb-")
+}
+
+// guardWorktreePath returns nil only when wtPath is safe to recursively delete:
+// it must be a sibling of the repo root (where DefaultPath places it) and its
+// basename must follow the bigband naming convention (<repo>-bb-<task>). This
+// prevents a corrupted or hand-edited state.json from steering os.RemoveAll
+// at an unrelated directory.
+func guardWorktreePath(repoRoot, wtPath string) error {
+	abs, err := filepath.Abs(wtPath)
+	if err != nil {
+		return err
+	}
+	rootAbs, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return err
+	}
+	expectedParent := filepath.Dir(rootAbs)
+	if filepath.Dir(abs) != expectedParent {
+		return fmt.Errorf("path is not a sibling of the repo root (expected parent %s, got %s)", expectedParent, filepath.Dir(abs))
+	}
+	base := filepath.Base(abs)
+	repoBase := filepath.Base(rootAbs)
+	if !strings.HasPrefix(base, repoBase+"-bb-") {
+		return fmt.Errorf("path basename %q does not match bigband worktree convention (%s-bb-<task>)", base, repoBase)
+	}
+	if abs == "/" || abs == rootAbs || abs == expectedParent {
+		return fmt.Errorf("path %s is the root, the repo, or its parent — refusing", abs)
 	}
 	return nil
 }

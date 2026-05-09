@@ -58,6 +58,13 @@ type streamWriter struct {
 	result    string
 	sessionID string
 	wakeup    *WakeupRequest
+
+	// Final-message capture: lastTextBlock holds the most recently completed
+	// text content block. On each result event it is promoted into
+	// finalMessage and then reset, so finalMessage always reflects the last
+	// non-empty assistant text from the most recent turn.
+	lastTextBlock string
+	finalMessage  string
 }
 
 // WakeupRequest holds the parameters Claude passed to ScheduleWakeup.
@@ -107,6 +114,15 @@ func (sw *streamWriter) getWakeup() *WakeupRequest {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 	return sw.wakeup
+}
+
+// getFinalMessage returns the most recent non-empty assistant text block from
+// the most recent turn (set on each result event). Empty when the run produced
+// no assistant text — e.g. ended on a tool call.
+func (sw *streamWriter) getFinalMessage() string {
+	sw.mu.Lock()
+	defer sw.mu.Unlock()
+	return sw.finalMessage
 }
 
 func (sw *streamWriter) processLines() {
@@ -266,6 +282,7 @@ func (sw *streamWriter) handleStreamEvent(raw json.RawMessage) {
 			text := strings.TrimRight(sw.textBuf.String(), "\n")
 			if text != "" {
 				sw.writeLog(stamp() + "● " + text + "\n")
+				sw.lastTextBlock = text
 			}
 			if sw.textOnLive {
 				sw.writeLive("\n")
@@ -425,6 +442,10 @@ func (sw *streamWriter) handleResult(evt *topLevelEvent) {
 	sw.result = evt.Result
 	if evt.SessionID != "" {
 		sw.sessionID = evt.SessionID
+	}
+	if sw.lastTextBlock != "" {
+		sw.finalMessage = sw.lastTextBlock
+		sw.lastTextBlock = ""
 	}
 
 	subtype := evt.Subtype

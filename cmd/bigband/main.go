@@ -66,8 +66,8 @@ Quick start:
 
 	addCmd("daemon", cli.NewDaemonCmd(), cli.NewInstallCmd(), cli.NewUninstallCmd(), cli.NewDaemonLogsCmd())
 	addCmd("tasks", cli.NewStatusCmd(), cli.NewListCmd(), cli.NewGetCmd(), cli.NewAddCmd(), cli.NewTemplateCmd(), cli.NewEditCmd(), cli.NewRmCmd(), cli.NewEnableCmd(), cli.NewDisableCmd(), cli.NewOpenCmd(), cli.NewWorktreeCmd())
-	addCmd("run", cli.NewRunCmd(), cli.NewStopCmd(), cli.NewLogsCmd(), cli.NewResumeCmd())
-	addCmd("config", cli.NewValidateCmd(), cli.NewConfigCmd())
+	addCmd("run", cli.NewRunCmd(), cli.NewSubmitCmd(), cli.NewFollowupCmd(), cli.NewStopCmd(), cli.NewLogsCmd(), cli.NewResumeCmd(), cli.NewEventsCmd(), cli.NewSubscribeCmd(), cli.NewSubscribersCmd(), cli.NewExtCmd())
+	addCmd("config", cli.NewValidateCmd(), cli.NewConfigCmd(), cli.NewPruneCmd())
 
 	return root
 }

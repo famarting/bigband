@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/famarting/bigband/internal/config"
+	"github.com/famarting/bigband/internal/events"
 	"github.com/famarting/bigband/internal/ipc"
 	"github.com/famarting/bigband/internal/paths"
 	"github.com/famarting/bigband/internal/runner"
@@ -63,7 +64,7 @@ func NewRunCmd() *cobra.Command {
 			}
 			st, _ := state.Load()
 			t.ClearJitter() // Don't apply jitter to manual runs.
-			runner.Run(context.Background(), cfg, t, st, os.Stdout)
+			runner.Run(context.Background(), cfg, t, st, os.Stdout, events.NopPublisher{})
 			return nil
 		},
 	}

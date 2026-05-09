@@ -293,10 +293,20 @@ func addTemplateWizard(seed *config.Task) error {
 		postExec = defaultPostExec
 	}
 
+	defaultWorktree := true
+	if seed != nil && seed.Worktree != nil {
+		defaultWorktree = *seed.Worktree
+	}
+	useWorktree, err := askYesNo(r, "Use a git worktree?", defaultWorktree)
+	if err != nil {
+		return err
+	}
+
 	tmpl := map[string]any{
-		"name":   name,
-		"folder": folder,
-		"prompt": prompt,
+		"name":     name,
+		"folder":   folder,
+		"prompt":   prompt,
+		"worktree": useWorktree,
 	}
 	if sched != "" {
 		tmpl["schedule"] = sched
@@ -308,10 +318,10 @@ func addTemplateWizard(seed *config.Task) error {
 		tmpl["post_exec"] = postExec
 	}
 	if seed != nil {
-		if seed.KeepWorktree != nil {
+		if useWorktree && seed.KeepWorktree != nil {
 			tmpl["keep_worktree"] = *seed.KeepWorktree
 		}
-		if seed.ReuseWorktree != nil {
+		if useWorktree && seed.ReuseWorktree != nil {
 			tmpl["reuse_worktree"] = *seed.ReuseWorktree
 		}
 		if seed.Timeout != nil {

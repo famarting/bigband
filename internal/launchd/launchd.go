@@ -1,4 +1,11 @@
-// Package launchd generates and manages a macOS LaunchAgent plist for bigband.
+// Package launchd generates and manages macOS LaunchAgent plists for bigband
+// and its sidecars (e.g. bigband-slack).
+//
+// Service is the parameterised entry point: each service has its own label,
+// argv, log path, and optional environment variables, but shares plist
+// generation and bootstrap/unload logic. Pre-existing helpers
+// (Install/Uninstall/Start/Stop) wrap the bigband-daemon Service for
+// backwards compatibility.
 package launchd
 
 import (
@@ -7,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -14,12 +22,22 @@ import (
 	"github.com/famarting/bigband/internal/paths"
 )
 
-const label = "io.bigband.daemon"
+const bigbandLabel = "io.bigband.daemon"
 
-// xmlEscape escapes a string for safe insertion into an XML text node. The
-// values rendered into the plist (HOME, PATH, BinaryPath, log path) come from
-// the user's environment and may legitimately contain `&`, `<`, or `>`; without
-// escaping, those characters would produce a malformed plist.
+// Service describes one LaunchAgent. Construct with NewBigbandService or
+// build inline for sidecars.
+type Service struct {
+	// Label is the launchd reverse-DNS label, e.g. "io.bigband.daemon".
+	Label string
+	// Args are the program arguments (the binary path is prepended). The
+	// first non-binary slot is typically the subcommand (e.g. "daemon").
+	Args []string
+	// LogPath is where stdout+stderr are redirected.
+	LogPath string
+	// Env adds EnvironmentVariables to the plist on top of HOME/PATH.
+	Env map[string]string
+}
+
 func xmlEscape(s string) string {
 	var b strings.Builder
 	_ = xml.EscapeText(&b, []byte(s))
@@ -36,8 +54,9 @@ var plistTemplate = template.Must(template.New("plist").Funcs(template.FuncMap{
     <string>{{xml .Label}}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{{xml .BinaryPath}}</string>
-        <string>daemon</string>
+{{- range .Args}}
+        <string>{{xml .}}</string>
+{{- end}}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -52,52 +71,61 @@ var plistTemplate = template.Must(template.New("plist").Funcs(template.FuncMap{
     <string>{{xml .LogPath}}</string>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>HOME</key>
-        <string>{{xml .Home}}</string>
-        <key>PATH</key>
-        <string>{{xml .Path}}</string>
+{{- range $k, $v := .Env}}
+        <key>{{xml $k}}</key>
+        <string>{{xml $v}}</string>
+{{- end}}
     </dict>
 </dict>
 </plist>
 `))
 
 type plistData struct {
-	Label      string
-	BinaryPath string
-	LogPath    string
-	Home       string
-	Path       string
+	Label   string
+	Args    []string
+	LogPath string
+	Env     map[string]string
 }
 
-func plistPath() string {
+// PlistPath is where this Service's plist will be written.
+func (s *Service) PlistPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", label+".plist")
+	return filepath.Join(home, "Library", "LaunchAgents", s.Label+".plist")
 }
 
 // Install writes the plist and starts (or restarts) the agent.
-// If the agent is already running it is kicked so the new binary takes effect.
-func Install(start bool) error {
+func (s *Service) Install() error {
 	binary, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("cannot determine binary path: %w", err)
 	}
 	home, _ := os.UserHomeDir()
-
 	if err := paths.EnsureDirs(); err != nil {
 		return err
 	}
-
-	alreadyInstalled := plistExists()
-
-	data := plistData{
-		Label:      label,
-		BinaryPath: binary,
-		LogPath:    paths.DaemonLog(),
-		Home:       home,
-		Path:       os.Getenv("PATH"),
+	if err := os.MkdirAll(filepath.Dir(s.LogPath), 0700); err != nil {
+		return fmt.Errorf("creating log dir: %w", err)
 	}
 
-	f, err := os.Create(plistPath())
+	alreadyInstalled := s.PlistExists()
+
+	args := append([]string{binary}, s.Args...)
+	env := map[string]string{
+		"HOME": home,
+		"PATH": os.Getenv("PATH"),
+	}
+	// User-supplied env overrides HOME/PATH if explicitly set.
+	for k, v := range s.Env {
+		env[k] = v
+	}
+	data := plistData{
+		Label:   s.Label,
+		Args:    args,
+		LogPath: s.LogPath,
+		Env:     sortedEnv(env),
+	}
+
+	f, err := os.Create(s.PlistPath())
 	if err != nil {
 		return fmt.Errorf("creating plist: %w", err)
 	}
@@ -106,40 +134,39 @@ func Install(start bool) error {
 		return fmt.Errorf("writing plist: %w", err)
 	}
 	f.Close()
-
-	fmt.Printf("Wrote %s\n", plistPath())
+	fmt.Printf("Wrote %s\n", s.PlistPath())
 
 	if alreadyInstalled {
-		// Kick the running instance so the new binary takes effect immediately.
 		uid := strconv.Itoa(os.Getuid())
-		out, err := exec.Command("launchctl", "kickstart", "-k", "gui/"+uid+"/"+label).CombinedOutput()
+		out, err := exec.Command("launchctl", "kickstart", "-k", "gui/"+uid+"/"+s.Label).CombinedOutput()
 		if err != nil {
 			fmt.Printf("WARNING: kickstart failed: %s\n", out)
 		} else {
-			fmt.Println("Daemon restarted with new binary.")
+			fmt.Printf("%s restarted with new binary.\n", s.Label)
 		}
 		return nil
 	}
 
-	if err := bootstrapLoad(); err != nil {
+	if err := s.bootstrapLoad(); err != nil {
 		fmt.Printf("WARNING: could not load agent automatically: %v\n", err)
-		fmt.Printf("Run manually: launchctl load -w %s\n", plistPath())
+		fmt.Printf("Run manually: launchctl load -w %s\n", s.PlistPath())
 	} else {
-		fmt.Println("Daemon installed and started.")
+		fmt.Printf("%s installed and started.\n", s.Label)
 	}
 	return nil
 }
 
-func plistExists() bool {
-	_, err := os.Stat(plistPath())
+// PlistExists reports whether this service's plist file is already on disk.
+func (s *Service) PlistExists() bool {
+	_, err := os.Stat(s.PlistPath())
 	return err == nil
 }
 
-// Uninstall stops and removes the LaunchAgent.
-func Uninstall() error {
-	_ = Stop()
-	_ = bootstrapUnload()
-	p := plistPath()
+// Uninstall stops and removes the LaunchAgent plist.
+func (s *Service) Uninstall() error {
+	_ = s.Stop()
+	_ = s.bootstrapUnload()
+	p := s.PlistPath()
 	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -148,13 +175,33 @@ func Uninstall() error {
 }
 
 // Start asks launchctl to start the agent.
-func Start() error {
-	return launchctl("start", label)
-}
+func (s *Service) Start() error { return launchctl("start", s.Label) }
 
 // Stop asks launchctl to stop the agent.
-func Stop() error {
-	return launchctl("stop", label)
+func (s *Service) Stop() error { return launchctl("stop", s.Label) }
+
+func (s *Service) bootstrapLoad() error {
+	uid := strconv.Itoa(os.Getuid())
+	out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid, s.PlistPath()).CombinedOutput()
+	if err != nil {
+		out2, err2 := exec.Command("launchctl", "load", "-w", s.PlistPath()).CombinedOutput()
+		if err2 != nil {
+			return fmt.Errorf("%s; legacy load: %s", out, out2)
+		}
+	}
+	return nil
+}
+
+func (s *Service) bootstrapUnload() error {
+	uid := strconv.Itoa(os.Getuid())
+	out, err := exec.Command("launchctl", "bootout", "gui/"+uid+"/"+s.Label).CombinedOutput()
+	if err != nil {
+		out2, err2 := exec.Command("launchctl", "unload", "-w", s.PlistPath()).CombinedOutput()
+		if err2 != nil {
+			return fmt.Errorf("%s; legacy unload: %s", out, out2)
+		}
+	}
+	return nil
 }
 
 func launchctl(args ...string) error {
@@ -165,27 +212,45 @@ func launchctl(args ...string) error {
 	return nil
 }
 
-func bootstrapLoad() error {
-	uid := strconv.Itoa(os.Getuid())
-	out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid, plistPath()).CombinedOutput()
-	if err != nil {
-		// Fallback to legacy load.
-		out2, err2 := exec.Command("launchctl", "load", "-w", plistPath()).CombinedOutput()
-		if err2 != nil {
-			return fmt.Errorf("%s; legacy load: %s", out, out2)
-		}
+// sortedEnv returns env's keys in deterministic order. Templates iterate the
+// map directly via {{range}}, which Go orders by key for string maps; this
+// helper keeps the contract explicit so stable plist output is preserved.
+func sortedEnv(env map[string]string) map[string]string {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
 	}
-	return nil
+	sort.Strings(keys)
+	out := make(map[string]string, len(env))
+	for _, k := range keys {
+		out[k] = env[k]
+	}
+	return out
 }
 
-func bootstrapUnload() error {
-	uid := strconv.Itoa(os.Getuid())
-	out, err := exec.Command("launchctl", "bootout", "gui/"+uid+"/"+label).CombinedOutput()
-	if err != nil {
-		out2, err2 := exec.Command("launchctl", "unload", "-w", plistPath()).CombinedOutput()
-		if err2 != nil {
-			return fmt.Errorf("%s; legacy unload: %s", out, out2)
-		}
+// --- Backwards-compatible wrappers for the bigband daemon ---
+
+// BigbandDaemonService returns the Service describing the main bigband daemon.
+func BigbandDaemonService() *Service {
+	return &Service{
+		Label:   bigbandLabel,
+		Args:    []string{"daemon"},
+		LogPath: paths.DaemonLog(),
 	}
-	return nil
 }
+
+// Install installs the bigband daemon LaunchAgent. Preserved for callers that
+// haven't been updated to the Service API.
+func Install(start bool) error {
+	_ = start // legacy parameter kept for signature compat; Install always starts.
+	return BigbandDaemonService().Install()
+}
+
+// Uninstall removes the bigband daemon LaunchAgent.
+func Uninstall() error { return BigbandDaemonService().Uninstall() }
+
+// Start asks launchctl to start the bigband daemon.
+func Start() error { return BigbandDaemonService().Start() }
+
+// Stop asks launchctl to stop the bigband daemon.
+func Stop() error { return BigbandDaemonService().Stop() }

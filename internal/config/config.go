@@ -59,6 +59,11 @@ type Defaults struct {
 	Effort     string   `yaml:"effort"`
 	Folder     string   `yaml:"folder"`
 	PreExec    []string `yaml:"pre_exec"`
+	// EphemeralRetention is how long IPC-submitted one-off task entries
+	// (state + log dirs) are kept after their last run. Zero or unset
+	// disables auto-pruning. Configured tasks (those in tasks:) are never
+	// touched. Default: 168h (7 days).
+	EphemeralRetention Duration `yaml:"ephemeral_retention"`
 }
 
 // Task is a single scheduled Claude Code job.
@@ -67,6 +72,7 @@ type Task struct {
 	Schedule         string    `yaml:"schedule"`
 	Folder           string    `yaml:"folder"`
 	Enabled          *bool     `yaml:"enabled"`
+	Worktree         *bool     `yaml:"worktree"`
 	KeepWorktree     *bool     `yaml:"keep_worktree"`
 	ReuseWorktree    *bool     `yaml:"reuse_worktree"`
 	PreExec          []string  `yaml:"pre_exec"`
@@ -81,10 +87,37 @@ type Task struct {
 	// Resolved fields — populated after Validate.
 	cronExpr       string
 	jitterResolved time.Duration
+
+	// In-memory only fields (never persisted to YAML).
+
+	// ResumeSessionID, when non-empty, makes the runner pass --resume <id> to
+	// the first claude invocation. Set by IPC submit for follow-ups.
+	ResumeSessionID string `yaml:"-"`
+	// Ephemeral marks a task that was constructed in-memory (e.g. via IPC
+	// submit) and must never be written back to config.yaml.
+	Ephemeral bool `yaml:"-"`
+	// TriggeredBy is a free-form label describing what caused this run
+	// (e.g. "slack:thread:123"). Surfaced in events for traceability.
+	TriggeredBy string `yaml:"-"`
+	// RunTimestamp pins the timestamp the runner uses for this run's log
+	// filename and run id. Set by IPC submit so the synchronously-returned
+	// run id matches the run id later carried on lifecycle events. Empty for
+	// scheduler-driven runs (the runner generates one at start).
+	RunTimestamp string `yaml:"-"`
 }
 
 // IsOneOff returns true when the task has no schedule and fires exactly once.
 func (t *Task) IsOneOff() bool { return t.Schedule == "" }
+
+// ShouldUseWorktree returns true when the task should run inside a git
+// worktree. Defaults to true for backwards compatibility — set worktree: false
+// to run directly inside task.Folder instead.
+func (t *Task) ShouldUseWorktree() bool {
+	if t.Worktree != nil {
+		return *t.Worktree
+	}
+	return true
+}
 
 // ShouldKeepWorktree returns true when the worktree should be preserved after
 // the run. Defaults to true — the worktree stays for inspection until the next
@@ -101,6 +134,24 @@ func (t *Task) ShouldKeepWorktree() bool {
 // as-is rather than replaced with a fresh snapshot of HEAD.
 func (t *Task) ShouldReuseWorktree() bool {
 	return t.ReuseWorktree != nil && *t.ReuseWorktree
+}
+
+// WorktreeMode returns a short label summarising how this task uses worktrees:
+//   - ""          when the task runs directly in its folder
+//   - "ephemeral" when a fresh worktree is created and removed each run
+//   - "fresh"     when a fresh worktree is created each run and kept afterwards
+//   - "reused"    when an existing worktree is reused across runs
+func (t *Task) WorktreeMode() string {
+	if !t.ShouldUseWorktree() {
+		return ""
+	}
+	if t.ShouldReuseWorktree() {
+		return "reused"
+	}
+	if t.ShouldKeepWorktree() {
+		return "fresh"
+	}
+	return "ephemeral"
 }
 
 // CronExpr returns the resolved cron expression (populated after Validate).
@@ -158,10 +209,11 @@ func parse(data []byte) (*Config, error) {
 
 func defaultDefaults() Defaults {
 	return Defaults{
-		Shell:      "/bin/sh",
-		Timeout:    Duration{45 * time.Minute},
-		RetainLogs: 50,
-		Jitter:     Duration{15 * time.Minute},
+		Shell:              "/bin/sh",
+		Timeout:            Duration{45 * time.Minute},
+		RetainLogs:         50,
+		Jitter:             Duration{15 * time.Minute},
+		EphemeralRetention: Duration{7 * 24 * time.Hour},
 	}
 }
 

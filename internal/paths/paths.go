@@ -32,6 +32,10 @@ func TaskLogLatest(name string) string {
 	return filepath.Join(TaskLogDir(name), "latest.log")
 }
 
+// EventsFile is the JSONL append-only log of lifecycle events emitted by the
+// daemon. Used by integrations as a durable ground-truth event stream.
+func EventsFile() string { return filepath.Join(Root(), "events.jsonl") }
+
 func EnsureDirs() error {
 	for _, d := range []string{Root(), StateDir(), LogsDir()} {
 		if err := os.MkdirAll(d, 0700); err != nil {

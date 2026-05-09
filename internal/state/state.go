@@ -26,13 +26,18 @@ const (
 
 // TaskState holds persisted info about a task.
 type TaskState struct {
-	LastRun      *time.Time `json:"last_run,omitempty"`
-	LastStatus   RunStatus  `json:"last_status,omitempty"`
-	LastDuration string     `json:"last_duration,omitempty"`
-	LastLog      string     `json:"last_log,omitempty"`
-	RunningPID   int        `json:"running_pid,omitempty"`
-	WorktreePath string     `json:"worktree_path,omitempty"`
-	SessionID    string     `json:"session_id,omitempty"`
+	LastRun       *time.Time `json:"last_run,omitempty"`
+	LastStatus    RunStatus  `json:"last_status,omitempty"`
+	LastDuration  string     `json:"last_duration,omitempty"`
+	LastLog       string     `json:"last_log,omitempty"`
+	LastReplyFile string     `json:"last_reply_file,omitempty"`
+	RunningPID    int        `json:"running_pid,omitempty"`
+	WorktreePath  string     `json:"worktree_path,omitempty"`
+	SessionID     string     `json:"session_id,omitempty"`
+	// Folder is the directory the most recent run executed in (i.e. task.Folder
+	// at runner start, before any worktree creation). Recorded so ephemeral
+	// submissions — which never appear in config.yaml — remain followable.
+	Folder string `json:"folder,omitempty"`
 }
 
 // State is the full state file.
@@ -67,20 +72,26 @@ func (s *State) get(name string) *TaskState {
 	return ts
 }
 
-// SetRunning marks a task as running with the given PID.
-func (s *State) SetRunning(name string, pid int) error {
+// SetRunning marks a task as running with the given PID and records the
+// folder the run is executing from. folder is the original task.Folder before
+// any worktree resolution; passing "" leaves the existing value unchanged.
+func (s *State) SetRunning(name string, pid int, folder string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ts := s.get(name)
 	ts.RunningPID = pid
+	if folder != "" {
+		ts.Folder = folder
+	}
 	now := time.Now()
 	ts.LastRun = &now
 	ts.LastStatus = StatusRunning
 	return s.save()
 }
 
-// SetDone records the final outcome of a run.
-func (s *State) SetDone(name string, status RunStatus, dur time.Duration, logPath string) error {
+// SetDone records the final outcome of a run. replyFile is the path to the
+// captured final assistant message (empty if none).
+func (s *State) SetDone(name string, status RunStatus, dur time.Duration, logPath, replyFile string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ts := s.get(name)
@@ -88,6 +99,7 @@ func (s *State) SetDone(name string, status RunStatus, dur time.Duration, logPat
 	ts.LastStatus = status
 	ts.LastDuration = dur.Round(time.Second).String()
 	ts.LastLog = logPath
+	ts.LastReplyFile = replyFile
 	return s.save()
 }
 
@@ -118,6 +130,46 @@ func (s *State) Get(name string) TaskState {
 		return *ts
 	}
 	return TaskState{}
+}
+
+// RemoveTask deletes the named entry from state. No-op when absent.
+func (s *State) RemoveTask(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.Tasks[name]; !ok {
+		return nil
+	}
+	delete(s.Tasks, name)
+	return s.save()
+}
+
+// RemoveStaleEphemerals drops state entries for tasks not in the configured
+// set whose LastRun is before cutoff and which are not currently running.
+// Returns the names removed (caller is expected to clean up logs/worktrees).
+//
+// Ephemeral here means "submitted via IPC, never written to config.yaml" —
+// configured tasks (whose names are in `configured`) are never touched, even
+// when their last run is ancient.
+func (s *State) RemoveStaleEphemerals(configured map[string]bool, cutoff time.Time) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var removed []string
+	for name, ts := range s.Tasks {
+		if configured[name] || ts == nil {
+			continue
+		}
+		if ts.RunningPID != 0 {
+			continue
+		}
+		if ts.LastRun == nil || ts.LastRun.Before(cutoff) {
+			delete(s.Tasks, name)
+			removed = append(removed, name)
+		}
+	}
+	if len(removed) > 0 {
+		_ = s.save()
+	}
+	return removed
 }
 
 func (s *State) save() error {

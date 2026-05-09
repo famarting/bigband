@@ -5,8 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/famarting/bigband/internal/config"
+	"github.com/famarting/bigband/internal/ipc"
 	"github.com/famarting/bigband/internal/paths"
 	"github.com/famarting/bigband/internal/schedule"
 	"github.com/famarting/bigband/internal/state"
@@ -134,6 +137,43 @@ func addTaskWizard(seed *config.Task) error {
 		postExec = defaultPostExec
 	}
 
+	defaultWorktree := true
+	if seed != nil && seed.Worktree != nil {
+		defaultWorktree = *seed.Worktree
+	}
+	useWorktree, err := askYesNo(r, "Use a git worktree?", defaultWorktree)
+	if err != nil {
+		return err
+	}
+
+	var defaultTimeout time.Duration
+	if seed != nil && seed.Timeout != nil {
+		defaultTimeout = seed.Timeout.Duration
+	} else if cfg, err := config.Load(paths.Config()); err == nil {
+		defaultTimeout = cfg.Defaults.Timeout.Duration
+	}
+	timeoutPrompt := "Timeout (e.g. 30m, 2h)"
+	if defaultTimeout > 0 {
+		timeoutPrompt = fmt.Sprintf("%s [%s]", timeoutPrompt, defaultTimeout)
+	}
+	var timeoutStr string
+	for {
+		raw, err := ask(timeoutPrompt)
+		if err != nil {
+			return err
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			break
+		}
+		if _, err := time.ParseDuration(raw); err != nil {
+			fmt.Printf("  invalid duration: %v\n", err)
+			continue
+		}
+		timeoutStr = raw
+		break
+	}
+
 	task := map[string]any{
 		"name":    name,
 		"folder":  folder,
@@ -149,15 +189,16 @@ func addTaskWizard(seed *config.Task) error {
 	if len(postExec) > 0 {
 		task["post_exec"] = postExec
 	}
+	if timeoutStr != "" {
+		task["timeout"] = timeoutStr
+	}
+	task["worktree"] = useWorktree
 	if seed != nil {
-		if seed.KeepWorktree != nil {
+		if useWorktree && seed.KeepWorktree != nil {
 			task["keep_worktree"] = *seed.KeepWorktree
 		}
-		if seed.ReuseWorktree != nil {
+		if useWorktree && seed.ReuseWorktree != nil {
 			task["reuse_worktree"] = *seed.ReuseWorktree
-		}
-		if seed.Timeout != nil {
-			task["timeout"] = seed.Timeout.String()
 		}
 		if seed.Jitter != nil {
 			task["jitter"] = seed.Jitter.String()
@@ -176,6 +217,7 @@ func addTaskWizard(seed *config.Task) error {
 		fmt.Printf("  schedule: (one-off, fires immediately)\n")
 	}
 	fmt.Printf("  folder:   %s\n", folder)
+	fmt.Printf("  worktree: %t\n", useWorktree)
 	promptPreview := strings.TrimSpace(prompt)
 	if nl := strings.IndexByte(promptPreview, '\n'); nl >= 0 {
 		promptPreview = promptPreview[:nl] + " …"
@@ -188,6 +230,11 @@ func addTaskWizard(seed *config.Task) error {
 	}
 	if len(postExec) > 0 {
 		fmt.Printf("  post_exec: %v\n", postExec)
+	}
+	if timeoutStr != "" {
+		fmt.Printf("  timeout:  %s\n", timeoutStr)
+	} else if defaultTimeout > 0 {
+		fmt.Printf("  timeout:  %s (default)\n", defaultTimeout)
 	}
 	fmt.Println()
 
@@ -205,6 +252,13 @@ func addTaskWizard(seed *config.Task) error {
 	}
 	if isOneOff {
 		return waitAndFollowLog(name, "")
+	}
+	// First-run hint: if the daemon isn't reachable, the user just defined a
+	// scheduled task that nothing will execute. Tell them how to fix it.
+	if reply, err := ipc.Send(ipc.Cmd{Action: "ping"}); err != nil || reply == nil || !reply.OK {
+		fmt.Println()
+		fmt.Println("The bigband daemon doesn't appear to be running yet.")
+		fmt.Println("Next: `bigband install` to start it as a LaunchAgent (auto-starts on login).")
 	}
 	return nil
 }
@@ -311,15 +365,18 @@ func editTask(name string) error {
 }
 
 func NewRmCmd() *cobra.Command {
-	return &cobra.Command{
+	var purgeLogs bool
+	cmd := &cobra.Command{
 		Use:               "rm <name>",
-		Short:             "Remove a task and clean up its worktree",
+		Short:             "Remove a task and clean up its worktree (and state, for ephemeral one-offs)",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeTaskNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return closeTask(args[0])
+			return closeTask(args[0], purgeLogs)
 		},
 	}
+	cmd.Flags().BoolVar(&purgeLogs, "purge-logs", false, "also delete the task's logs directory")
+	return cmd
 }
 
 func removeTask(name string) error {
@@ -407,36 +464,129 @@ func setEnabled(name string, enabled bool) error {
 	return os.WriteFile(paths.Config(), out, 0600)
 }
 
-func closeTask(name string) error {
+func closeTask(name string, purgeLogs bool) error {
 	st, err := state.Load()
 	if err != nil {
 		return err
 	}
 	ts := st.Get(name)
 
-	if ts.WorktreePath != "" {
-		cfg, err := config.Load(paths.Config())
-		if err != nil {
-			return err
-		}
-		t := cfg.TaskByName(name)
-		if t != nil {
-			if repoRoot, err := worktree.RepoRoot(t.Folder); err == nil {
-				if err := worktree.Remove(repoRoot, ts.WorktreePath); err != nil {
-					fmt.Printf("warning: could not remove worktree %s: %v\n", ts.WorktreePath, err)
-				} else {
-					fmt.Printf("removed worktree %s\n", ts.WorktreePath)
-				}
-			}
-		}
-		_ = st.SetWorktreePath(name, "")
+	cfg, _ := config.Load(paths.Config())
+	var configured *config.Task
+	if cfg != nil {
+		configured = cfg.TaskByName(name)
+	}
+	hasState := ts.LastRun != nil || ts.SessionID != "" || ts.WorktreePath != "" || ts.Folder != "" || ts.RunningPID != 0
+	if configured == nil && !hasState {
+		return fmt.Errorf("task %q not found", name)
 	}
 
-	if err := removeTask(name); err != nil {
-		return err
+	// Refuse to remove a task with a live in-flight run.
+	if ts.RunningPID != 0 && processAlive(ts.RunningPID) {
+		return fmt.Errorf("task %q is still running (pid %d) — stop it first with `bigband stop %s`", name, ts.RunningPID, name)
 	}
-	fmt.Printf("closed task %q\n", name)
+
+	// Worktree cleanup. Resolve the main repo root from whichever folder we
+	// know about. Falls back to `os.RemoveAll` when no repo can be located —
+	// preserves disk-space recovery even for orphaned legacy entries.
+	if ts.WorktreePath != "" {
+		sourceFolder := ""
+		if configured != nil {
+			sourceFolder = configured.Folder
+		}
+		if sourceFolder == "" {
+			sourceFolder = ts.Folder
+		}
+		repoRoot := ""
+		if sourceFolder != "" {
+			if root, err := worktree.RepoRoot(sourceFolder); err == nil {
+				repoRoot = root
+			}
+		}
+		if repoRoot != "" {
+			if err := worktree.Remove(repoRoot, ts.WorktreePath); err != nil {
+				fmt.Printf("warning: could not remove worktree %s: %v\n", ts.WorktreePath, err)
+			} else {
+				fmt.Printf("removed worktree %s\n", ts.WorktreePath)
+			}
+		} else if _, err := os.Stat(ts.WorktreePath); err == nil {
+			// We can't resolve the repo root, so we can't run `git worktree
+			// remove`. The fallback is `os.RemoveAll`, but only when the path
+			// looks like a bigband-managed worktree. A corrupted or hand-edited
+			// state.json that aimed this at an arbitrary path (a regular task
+			// folder, $HOME, /) will get refused with a clear message — the
+			// user can clean up manually if they really need to.
+			if !worktree.LooksLikeBigbandWorktree(ts.WorktreePath) {
+				fmt.Printf("warning: refusing to recursively delete %q — it does not match the bigband worktree naming convention (<repo>-bb-<task>).\n", ts.WorktreePath)
+				fmt.Printf("         Remove it manually if you're sure, then run `bigband prune --keep-logs` or `bigband rm` again.\n")
+			} else if err := os.RemoveAll(ts.WorktreePath); err != nil {
+				fmt.Printf("warning: could not remove worktree dir %s: %v\n", ts.WorktreePath, err)
+			} else {
+				fmt.Printf("removed worktree dir %s (could not resolve main repo for git prune)\n", ts.WorktreePath)
+			}
+		}
+	}
+
+	// Config removal — only when the task was actually in config.yaml.
+	if configured != nil {
+		if err := removeTask(name); err != nil {
+			return err
+		}
+		fmt.Printf("removed %q from config.yaml\n", name)
+	}
+
+	// State entry removal. Route through the daemon when it's running so its
+	// in-memory state map is updated too — otherwise the daemon would clobber
+	// our deletion on the next state save (SetRunning, SetDone, etc.) and the
+	// entry would reappear in `bb list` / `bb status`.
+	if hasState {
+		reply, ipcErr := ipc.Send(ipc.Cmd{Action: "forget", Task: name})
+		switch {
+		case ipcErr != nil:
+			// Daemon unreachable — safe to edit state.json directly.
+			if err := st.RemoveTask(name); err != nil {
+				fmt.Printf("warning: could not remove state entry: %v\n", err)
+			} else {
+				fmt.Printf("removed state entry for %q (daemon offline)\n", name)
+			}
+		case !reply.OK:
+			fmt.Printf("warning: daemon refused state removal: %s\n", reply.Error)
+		default:
+			fmt.Printf("removed state entry for %q\n", name)
+		}
+	}
+
+	// Optional log directory purge.
+	if purgeLogs {
+		dir := paths.TaskLogDir(name)
+		if _, err := os.Stat(dir); err == nil {
+			if err := os.RemoveAll(dir); err != nil {
+				fmt.Printf("warning: could not remove logs %s: %v\n", dir, err)
+			} else {
+				fmt.Printf("removed logs %s\n", dir)
+			}
+		}
+	} else {
+		dir := paths.TaskLogDir(name)
+		if _, err := os.Stat(dir); err == nil {
+			fmt.Printf("logs preserved at %s (use --purge-logs to delete)\n", dir)
+		}
+	}
+
 	return nil
+}
+
+// processAlive reports whether a pid corresponds to a running process. Used
+// to refuse `bigband rm` on tasks with a live runner.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return p.Signal(syscall.Signal(0)) == nil
 }
 
 func editPromptInEditor(initial string) (string, error) {

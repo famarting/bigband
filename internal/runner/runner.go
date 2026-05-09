@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/famarting/bigband/internal/config"
+	"github.com/famarting/bigband/internal/events"
 	"github.com/famarting/bigband/internal/paths"
 	"github.com/famarting/bigband/internal/state"
 	"github.com/famarting/bigband/internal/worktree"
@@ -25,8 +26,12 @@ import (
 // be called from a goroutine (e.g. the cron handler).
 // out receives a live copy of all output in addition to the log file;
 // pass io.Discard when live streaming is not needed.
+// pub receives lifecycle events; pass events.NopPublisher{} to disable.
 // Cancelling ctx terminates any in-progress shell command or Claude invocation.
-func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.State, out io.Writer) {
+func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.State, out io.Writer, pub events.Publisher) {
+	if pub == nil {
+		pub = events.NopPublisher{}
+	}
 	jitter := task.JitterDuration()
 	if jitter > 0 {
 		sleep := time.Duration(rand.Int63n(int64(jitter)))
@@ -46,7 +51,11 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 	}
 	defer release()
 
-	logPath, lf, err := openLog(task.Name)
+	ts := task.RunTimestamp
+	if ts == "" {
+		ts = time.Now().UTC().Format("2006-01-02T15-04-05Z")
+	}
+	logPath, lf, err := openLog(task.Name, ts)
 	if err != nil {
 		fmt.Fprintf(out, "[%s] cannot open log file: %v\n", task.Name, err)
 		return
@@ -57,7 +66,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 	logger := log.New(w, fmt.Sprintf("[%s] ", task.Name), log.LstdFlags)
 	started := time.Now()
 
-	if err := st.SetRunning(task.Name, os.Getpid()); err != nil {
+	if err := st.SetRunning(task.Name, os.Getpid(), task.Folder); err != nil {
 		logger.Printf("WARNING: state update failed: %v", err)
 	}
 
@@ -65,12 +74,34 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 	logger.Printf("  schedule: %s", task.Schedule)
 	logger.Printf("  prompt:   %s", strings.TrimSpace(task.Prompt))
 
+	// runID is task-name + log timestamp. Stable per run, used to correlate
+	// every event for this run.
+	runID := task.Name + "/" + filepath.Base(strings.TrimSuffix(logPath, ".log"))
+	pub.Publish(events.Envelope{
+		Type:        events.TypeTaskRunStarted,
+		RunID:       runID,
+		TaskName:    task.Name,
+		TriggeredBy: task.TriggeredBy,
+		Data: events.MustData(events.TaskRunStartedData{
+			Folder:     task.Folder,
+			Schedule:   task.Schedule,
+			OneOff:     task.IsOneOff(),
+			Worktree:   task.ShouldUseWorktree(),
+			Resume:     task.ResumeSessionID != "",
+			ResumeFrom: task.ResumeSessionID,
+			Ephemeral:  task.Ephemeral,
+		}),
+	})
+
 	// Declare all variables before any goto so the compiler is happy.
 	var (
-		status   = state.StatusOK
-		repoRoot string
-		wtPath   string
-		runDir   = task.Folder // updated after worktree creation; fallback is original folder
+		status    = state.StatusOK
+		repoRoot  string
+		wtPath    string
+		runDir    = task.Folder // updated after worktree creation; fallback is original folder
+		sessionID string
+		finalMsg  string // last non-empty assistant text from the final turn
+		replyPath string // sidecar file holding finalMsg, written before post_exec
 	)
 
 	// Pre-exec runs in the original folder so that commands like "git pull"
@@ -82,6 +113,15 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		if err := runShell(ctx, cfg, cmd, task.Folder, w, 30*time.Minute); err != nil {
 			logger.Printf("pre_exec failed: %v", err)
 			status = state.StatusPreFailed
+			pub.Publish(events.Envelope{
+				Type:     events.TypeTaskRunPreFailed,
+				RunID:    runID,
+				TaskName: task.Name,
+				Data: events.MustData(events.TaskRunPreFailedData{
+					Command: cmd,
+					Error:   err.Error(),
+				}),
+			})
 			goto postExec
 		}
 	}
@@ -89,6 +129,17 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 	// Worktree is created after pre_exec, so any "git pull" has already run
 	// and HEAD is up-to-date before we snapshot it into the worktree.
 	runDir, repoRoot, wtPath = resolveRunDir(task, w, logger, st)
+	if wtPath != "" {
+		pub.Publish(events.Envelope{
+			Type:     events.TypeTaskRunWorktreeReady,
+			RunID:    runID,
+			TaskName: task.Name,
+			Data: events.MustData(events.TaskRunWorktreeReadyData{
+				WorktreePath: wtPath,
+				RunDir:       runDir,
+			}),
+		})
+	}
 
 	// Claude — runs in a loop when Claude calls ScheduleWakeup to self-pace.
 	{
@@ -97,8 +148,51 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		timeout := cfg.EffectiveTimeout(task)
 		deadline := time.Now().Add(timeout)
 
-		sessionID, wakeup, err := runClaude(ctx, flags, task.Prompt, "", runDir, lf, out, timeout)
-		for wakeup != nil && err == nil {
+		var (
+			wakeup *WakeupRequest
+			runErr error
+			msg    string
+		)
+		// task.ResumeSessionID is set by IPC submit for follow-up runs that
+		// continue a previous Claude session. Empty for normal scheduled runs.
+		initialResume := task.ResumeSessionID
+		if initialResume != "" {
+			logger.Printf("resuming session %s", initialResume)
+		}
+		var sessionAnnounced bool
+		announceSession := func() {
+			if sessionAnnounced || sessionID == "" {
+				return
+			}
+			pub.Publish(events.Envelope{
+				Type:     events.TypeClaudeSessionStarted,
+				RunID:    runID,
+				TaskName: task.Name,
+				Data:     events.MustData(events.ClaudeSessionStartedData{SessionID: sessionID}),
+			})
+			sessionAnnounced = true
+		}
+		emitTurn := func() {
+			pub.Publish(events.Envelope{
+				Type:     events.TypeClaudeTurnCompleted,
+				RunID:    runID,
+				TaskName: task.Name,
+				Data: events.MustData(events.ClaudeTurnCompletedData{
+					FinalMessage: msg,
+					SessionID:    sessionID,
+				}),
+			})
+		}
+		sessionID, wakeup, msg, runErr = runClaude(ctx, flags, task.Prompt, initialResume, runDir, lf, out, timeout)
+		if sessionID == "" && initialResume != "" {
+			sessionID = initialResume
+		}
+		announceSession()
+		emitTurn()
+		if msg != "" {
+			finalMsg = msg
+		}
+		for wakeup != nil && runErr == nil {
 			if sessionID != "" {
 				if err2 := st.SetSessionID(task.Name, sessionID); err2 != nil {
 					logger.Printf("WARNING: state update failed: %v", err2)
@@ -114,10 +208,24 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 			if resumePrompt == "" || resumePrompt == "<<autonomous-loop-dynamic>>" {
 				resumePrompt = task.Prompt
 			}
+			pub.Publish(events.Envelope{
+				Type:     events.TypeClaudeWakeup,
+				RunID:    runID,
+				TaskName: task.Name,
+				Data: events.MustData(events.ClaudeWakeupData{
+					DelaySeconds: wakeup.DelaySeconds,
+					Prompt:       resumePrompt,
+				}),
+			})
 			logger.Printf("claude scheduled wakeup in %s — sleeping before resuming session %s", delay.Round(time.Second), sessionID)
 			time.Sleep(delay)
 			remaining = time.Until(deadline)
-			sessionID, wakeup, err = runClaude(ctx, flags, resumePrompt, sessionID, runDir, lf, out, remaining)
+			sessionID, wakeup, msg, runErr = runClaude(ctx, flags, resumePrompt, sessionID, runDir, lf, out, remaining)
+			announceSession()
+			emitTurn()
+			if msg != "" {
+				finalMsg = msg
+			}
 		}
 
 		if sessionID != "" {
@@ -125,12 +233,12 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 				logger.Printf("WARNING: state update failed: %v", err)
 			}
 		}
-		if err != nil {
-			logger.Printf("claude failed: %v", err)
+		if runErr != nil {
+			logger.Printf("claude failed: %v", runErr)
 			switch {
 			case ctx.Err() != nil:
 				status = state.StatusStopped
-			case strings.Contains(err.Error(), "context deadline exceeded"):
+			case strings.Contains(runErr.Error(), "context deadline exceeded"):
 				status = state.StatusTimeout
 			default:
 				status = state.StatusFailed
@@ -139,6 +247,18 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 	}
 
 postExec:
+	// Persist Claude's final assistant message to a sidecar file alongside the
+	// log so post_exec scripts and downstream integrations can read it without
+	// reparsing the stream-json log. Empty when the run produced no text
+	// (e.g. ended on a tool call) — surface that, don't fabricate.
+	if finalMsg != "" {
+		replyPath = strings.TrimSuffix(logPath, ".log") + ".reply.txt"
+		if err := os.WriteFile(replyPath, []byte(finalMsg), 0600); err != nil {
+			logger.Printf("WARNING: failed to write reply file: %v", err)
+			replyPath = ""
+		}
+	}
+
 	// Post-exec runs in runDir (worktree when available) so it can inspect or
 	// commit whatever Claude produced. Falls back to task.Folder if no worktree.
 	if len(task.PostExec) > 0 {
@@ -149,6 +269,8 @@ postExec:
 		"BIGBAND_LOG=" + logPath,
 		"BIGBAND_TASK=" + task.Name,
 		"BIGBAND_WORKTREE=" + wtPath,
+		"BIGBAND_REPLY_FILE=" + replyPath,
+		"BIGBAND_SESSION_ID=" + sessionID,
 	}
 	for _, cmd := range task.PostExec {
 		if err := runShellWithEnv(ctx, cfg, cmd, runDir, w, 10*time.Minute, env); err != nil {
@@ -173,9 +295,26 @@ postExec:
 	dur := time.Since(started)
 	logger.Printf("=== END status=%s duration=%s", status, dur.Round(time.Second))
 
-	if err := st.SetDone(task.Name, status, dur, logPath); err != nil {
+	if err := st.SetDone(task.Name, status, dur, logPath, replyPath); err != nil {
 		logger.Printf("WARNING: state update failed: %v", err)
 	}
+
+	pub.Publish(events.Envelope{
+		Type:        events.TypeTaskRunCompleted,
+		RunID:       runID,
+		TaskName:    task.Name,
+		TriggeredBy: task.TriggeredBy,
+		Data: events.MustData(events.TaskRunCompletedData{
+			Status:       string(status),
+			FinalMessage: finalMsg,
+			LogPath:      logPath,
+			ReplyFile:    replyPath,
+			SessionID:    sessionID,
+			Folder:       task.Folder,
+			WorktreePath: wtPath,
+			DurationMS:   dur.Milliseconds(),
+		}),
+	})
 
 	trimLogs(task.Name, cfg.Defaults.RetainLogs)
 }
@@ -188,6 +327,10 @@ postExec:
 // On any failure it falls back gracefully to task.Folder.
 func resolveRunDir(task *config.Task, w io.Writer, logger *log.Logger, st *state.State) (runDir, repoRoot, wtPath string) {
 	runDir = task.Folder
+	if !task.ShouldUseWorktree() {
+		logger.Printf("NOTE: worktree disabled — running in original folder %s", task.Folder)
+		return
+	}
 	root, err := worktree.RepoRoot(task.Folder)
 	if err != nil {
 		logger.Printf("NOTE: skipping worktree — %v", err)
@@ -237,14 +380,16 @@ func resolveRunDir(task *config.Task, w io.Writer, logger *log.Logger, st *state
 	return
 }
 
-func openLog(taskName string) (string, *os.File, error) {
+func openLog(taskName, ts string) (string, *os.File, error) {
 	dir := paths.TaskLogDir(taskName)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", nil, err
 	}
-	ts := time.Now().UTC().Format("2006-01-02T15-04-05Z")
 	logPath := filepath.Join(dir, ts+".log")
-	f, err := os.Create(logPath)
+	// 0600 explicitly: log files contain Claude's full output (prompts,
+	// tool I/O, final messages) and could legitimately include secrets the
+	// task was asked to handle. Defense-in-depth alongside the 0700 dir.
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return "", nil, err
 	}
@@ -274,7 +419,7 @@ func runShellWithEnv(ctx context.Context, cfg *config.Config, cmd, dir string, w
 	return c.Run()
 }
 
-func runClaude(ctx context.Context, flags []string, prompt, resumeSessionID, dir string, log, live io.Writer, timeout time.Duration) (sessionID string, wakeup *WakeupRequest, err error) {
+func runClaude(ctx context.Context, flags []string, prompt, resumeSessionID, dir string, log, live io.Writer, timeout time.Duration) (sessionID string, wakeup *WakeupRequest, finalMessage string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var args []string
@@ -295,7 +440,8 @@ func runClaude(ctx context.Context, flags []string, prompt, resumeSessionID, dir
 	err = c.Run()
 	_, sessionID = sw.getResult()
 	wakeup = sw.getWakeup()
-	return sessionID, wakeup, err
+	finalMessage = sw.getFinalMessage()
+	return sessionID, wakeup, finalMessage, err
 }
 
 // isTerminal returns true when w is an *os.File backed by a character device

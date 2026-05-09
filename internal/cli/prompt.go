@@ -91,6 +91,25 @@ func askConfirm(r *bufio.Reader, prompt string) (bool, error) {
 	return ans == "" || ans == "y" || ans == "yes", nil
 }
 
+// askYesNo prompts for a yes/no answer with the given default. Empty input
+// returns the default.
+func askYesNo(r *bufio.Reader, prompt string, defaultYes bool) (bool, error) {
+	suffix := "[Y/n]"
+	if !defaultYes {
+		suffix = "[y/N]"
+	}
+	fmt.Printf("%s %s: ", prompt, suffix)
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return false, err
+	}
+	ans := strings.ToLower(strings.TrimSpace(line))
+	if ans == "" {
+		return defaultYes, nil
+	}
+	return ans == "y" || ans == "yes", nil
+}
+
 func newReader() *bufio.Reader {
 	return bufio.NewReader(os.Stdin)
 }

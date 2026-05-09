@@ -15,8 +15,9 @@ import (
 
 func NewListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List configured tasks with their schedule and next run",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List configured tasks with their schedule and next run",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reply, err := ipc.Send(ipc.Cmd{Action: "status"})
 			if err == nil && reply.OK {
@@ -34,7 +35,7 @@ func printTaskList(reply *ipc.Reply) error {
 		return err
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN\tWORKTREE")
+	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN\tRUN DIR")
 	for _, t := range payload.Tasks {
 		sched := t.Schedule
 		if sched == "" {
@@ -44,13 +45,27 @@ func printTaskList(reply *ipc.Reply) error {
 		if !t.Enabled {
 			enabled = "no"
 		}
-		wt := "-"
-		if t.WorktreePath != "" {
-			wt = t.WorktreePath
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.Name, sched, enabled, t.NextRun, wt)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.Name, sched, enabled, t.NextRun, runDir(t.WorktreePath, t.Folder, t.WorktreeMode))
 	}
 	return w.Flush()
+}
+
+// runDir picks the directory to display alongside the worktree mode: the
+// active worktree path if recorded, otherwise the configured task folder. The
+// mode (when non-empty) is appended in parentheses so the reader can tell at a
+// glance whether the task uses a worktree and how it manages it.
+func runDir(worktreePath, folder, mode string) string {
+	dir := worktreePath
+	if dir == "" {
+		dir = folder
+	}
+	if dir == "" {
+		return "-"
+	}
+	if mode != "" {
+		return dir + " (" + mode + ")"
+	}
+	return dir
 }
 
 func printOfflineTaskList() error {
@@ -60,7 +75,7 @@ func printOfflineTaskList() error {
 	}
 	st, _ := state.Load()
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN\tWORKTREE")
+	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN\tRUN DIR")
 	for _, t := range cfg.Tasks {
 		enabled := "yes"
 		if !t.IsEnabled() {
@@ -77,11 +92,7 @@ func printOfflineTaskList() error {
 				nextRun = "done"
 			}
 		}
-		wt := "-"
-		if ts.WorktreePath != "" {
-			wt = ts.WorktreePath
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.Name, sched, enabled, nextRun, wt)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.Name, sched, enabled, nextRun, runDir(ts.WorktreePath, t.Folder, t.WorktreeMode()))
 	}
 	return w.Flush()
 }
