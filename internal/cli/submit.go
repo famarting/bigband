@@ -162,7 +162,9 @@ func NewFollowupCmd() *cobra.Command {
 				return fmt.Errorf("daemon error: %s", reply.Error)
 			}
 			var out ipc.SubmitRunReply
-			_ = json.Unmarshal(reply.Payload, &out)
+			if err := json.Unmarshal(reply.Payload, &out); err != nil {
+				return fmt.Errorf("decoding reply: %w", err)
+			}
 			fmt.Printf("followup submitted: task=%s run_id=%s\n", out.TaskName, out.RunID)
 			return nil
 		},

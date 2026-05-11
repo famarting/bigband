@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,11 +13,11 @@ import (
 // for v1 — the data set is small (one entry per active thread). Atomic
 // rename on save so we never leave a half-written file.
 type Store struct {
-	mu     sync.Mutex
-	path   string
-	Tasks  map[string]TaskMapping `json:"tasks"`
-	Runs   map[string]RunMapping  `json:"runs"`
-	Threads map[string]string     `json:"threads"` // thread_ts → task_name
+	mu      sync.Mutex
+	path    string
+	Tasks   map[string]TaskMapping `json:"tasks"`
+	Runs    map[string]RunMapping  `json:"runs"`
+	Threads map[string]string      `json:"threads"` // thread_ts → task_name
 }
 
 // TaskMapping holds the most recent thread/session for a task name. Used to
@@ -54,7 +55,7 @@ func LoadStore() (*Store, error) {
 		Threads: map[string]string{},
 	}
 	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
 	}
 	if err != nil {
@@ -92,6 +93,22 @@ func (s *Store) LinkRun(runID, taskName, channel, threadTS, sessionID string) er
 	prev.LastSeenUnix = now
 	s.Tasks[taskName] = prev
 	s.Threads[threadTS] = taskName
+	return s.save()
+}
+
+// SetTaskSessionID records the latest Claude session id for a task. Used when
+// the session-started event arrives independently of LinkRun (e.g. for runs
+// that didn't originate from Slack).
+func (s *Store) SetTaskSessionID(taskName, sessionID string) error {
+	if sessionID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prev := s.Tasks[taskName]
+	prev.SessionID = sessionID
+	prev.LastSeenUnix = time.Now().Unix()
+	s.Tasks[taskName] = prev
 	return s.save()
 }
 

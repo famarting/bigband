@@ -1,11 +1,10 @@
 package cli
 
 import (
-	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"time"
 
 	"github.com/famarting/bigband/internal/daemon"
 	"github.com/famarting/bigband/internal/paths"
@@ -25,7 +24,7 @@ func NewDaemonCmd() *cobra.Command {
 
 func NewDaemonLogsCmd() *cobra.Command {
 	var follow bool
-	var tailLines int
+	var tailN int
 
 	cmd := &cobra.Command{
 		Use:   "daemon-logs",
@@ -34,15 +33,15 @@ func NewDaemonLogsCmd() *cobra.Command {
 			path := paths.DaemonLog()
 			f, err := os.Open(path)
 			if err != nil {
-				if os.IsNotExist(err) {
+				if errors.Is(err, os.ErrNotExist) {
 					return fmt.Errorf("no daemon log found at %s (has the daemon ever run?)", path)
 				}
 				return err
 			}
 			defer f.Close()
 
-			if tailLines > 0 {
-				if err := printLastLines(f, tailLines); err != nil {
+			if tailN > 0 {
+				if err := printLastLines(f, tailN); err != nil {
 					return err
 				}
 			} else if _, err := io.Copy(os.Stdout, f); err != nil {
@@ -52,33 +51,13 @@ func NewDaemonLogsCmd() *cobra.Command {
 			if !follow {
 				return nil
 			}
-			return tailUnbounded(f)
+			return tailLines(f, nil)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "tail the log in real time")
-	cmd.Flags().IntVarP(&tailLines, "tail", "n", 0, "show only the last N lines (0 = whole file)")
+	cmd.Flags().IntVarP(&tailN, "tail", "n", 0, "show only the last N lines (0 = whole file)")
 	return cmd
-}
-
-// tailUnbounded streams new lines until the process is interrupted. Unlike
-// tailFile (used for task logs), it has no "=== END" termination marker.
-func tailUnbounded(f *os.File) error {
-	fmt.Println("\n--- following ---")
-	r := bufio.NewReader(f)
-	for {
-		line, err := r.ReadString('\n')
-		if len(line) > 0 {
-			fmt.Print(line)
-		}
-		if err == io.EOF {
-			time.Sleep(300 * time.Millisecond)
-			continue
-		}
-		if err != nil {
-			return err
-		}
-	}
 }
 
 // printLastLines prints the last n newline-delimited lines of f and leaves the

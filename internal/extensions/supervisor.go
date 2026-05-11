@@ -2,7 +2,6 @@ package extensions
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"reflect"
@@ -26,21 +25,20 @@ const (
 	StatusInvalid  Status = "invalid"  // manifest could not be loaded/validated
 )
 
-// healthyThreshold is how long a child must run before consecutive-failure
-// count resets. Tunable; values in the high single-digit seconds work well in
-// practice. Tests can shorten this via SetHealthyThreshold.
-var healthyThreshold = 30 * time.Second
-
-// SetHealthyThreshold overrides healthyThreshold. For tests only.
-func SetHealthyThreshold(d time.Duration) { healthyThreshold = d }
+// DefaultHealthyThreshold is how long a child must run before its
+// consecutive-failure count resets. Tunable per-Supervisor via
+// NewSupervisorWithHealthyThreshold; values in the high single-digit seconds
+// work well in practice.
+const DefaultHealthyThreshold = 30 * time.Second
 
 // Supervisor runs and watches the set of extensions declared by manifests
 // under extDir. One goroutine per extension drives its spawn → wait →
 // restart loop. All public methods are safe for concurrent use.
 type Supervisor struct {
-	extDir string
-	bus    events.Publisher
-	logger *log.Logger
+	extDir           string
+	bus              events.Publisher
+	logger           *log.Logger
+	healthyThreshold time.Duration
 
 	mu     sync.Mutex
 	states map[string]*procState
@@ -73,19 +71,26 @@ type procState struct {
 	manuallyStopped bool
 }
 
-// NewSupervisor builds a Supervisor. Call Apply for each manifest discovered
-// at startup, then continue calling Apply / Remove as the manifest dir
-// changes. extDir is informational (used in log messages); discovery is
-// driven by the caller.
+// NewSupervisor builds a Supervisor with DefaultHealthyThreshold. Call Apply
+// for each manifest discovered at startup, then continue calling Apply /
+// Remove as the manifest dir changes. extDir is informational (used in log
+// messages); discovery is driven by the caller.
 func NewSupervisor(extDir string, bus events.Publisher, logger *log.Logger) *Supervisor {
+	return NewSupervisorWithHealthyThreshold(extDir, bus, logger, DefaultHealthyThreshold)
+}
+
+// NewSupervisorWithHealthyThreshold builds a Supervisor with a custom healthy
+// threshold. Tests use a short threshold to exercise restart paths quickly.
+func NewSupervisorWithHealthyThreshold(extDir string, bus events.Publisher, logger *log.Logger, healthyThreshold time.Duration) *Supervisor {
 	if logger == nil {
 		logger = log.Default()
 	}
 	return &Supervisor{
-		extDir: extDir,
-		bus:    bus,
-		logger: logger,
-		states: map[string]*procState{},
+		extDir:           extDir,
+		bus:              bus,
+		logger:           logger,
+		healthyThreshold: healthyThreshold,
+		states:           map[string]*procState{},
 	}
 }
 
@@ -446,7 +451,7 @@ func (s *Supervisor) run(st *procState, stopReq <-chan struct{}, doneCh chan str
 		// run and reset the consecutive-failures counter — only rapid crashes
 		// trip the circuit breaker.
 		s.mu.Lock()
-		if res.duration() >= healthyThreshold {
+		if res.duration() >= s.healthyThreshold {
 			st.consecutiveFailures = 0
 		} else if shouldRestart {
 			st.consecutiveFailures++
@@ -555,6 +560,3 @@ func specEqual(a, b *Manifest) bool {
 	}
 	return true
 }
-
-// ErrUnknown is returned by IPC handlers for unknown extension names.
-var ErrUnknown = errors.New("unknown extension")

@@ -522,7 +522,7 @@ func (sw *streamWriter) handleSystem(evt *topLevelEvent) {
 	}
 }
 
-func (sw *streamWriter) writeLog(s string) { fmt.Fprint(sw.log, s) }
+func (sw *streamWriter) writeLog(s string)  { fmt.Fprint(sw.log, s) }
 func (sw *streamWriter) writeLive(s string) { fmt.Fprint(sw.live, s) }
 
 func (sw *streamWriter) color(s, code string) string {

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"log"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/famarting/bigband/pkg/bigbandext"
@@ -16,6 +18,9 @@ func newDaemonCmd() *cobra.Command {
 		Short:  "Run the Slack integration in the foreground (normally invoked by launchd)",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
+			defer cancel()
+
 			cfg, err := LoadConfig()
 			if err != nil {
 				return err
@@ -43,19 +48,19 @@ func newDaemonCmd() *cobra.Command {
 			// changes still require a full restart — the socket-mode session
 			// is bound at startup. Rule-only changes (mirror, trigger_channels,
 			// threads) take effect immediately.
-			go watchConfigFile(router)
+			go watchConfigFile(ctx, router)
 
 			// Subscribe to the bigband event stream; reconnects with backoff
 			// when the daemon restarts. Uses pkg/bigbandext.Client.Subscribe
 			// directly — same API any external integration would use.
-			go runSubscribeLoop(router)
+			go runSubscribeLoop(ctx, router)
 
 			// Periodically prune stale mappings so the store doesn't grow
 			// unbounded. Default 7 days; configurable via `retention:`.
-			go runPruneLoop(store, cfg.RetentionDuration())
+			go runPruneLoop(ctx, store, cfg.RetentionDuration())
 
 			log.Println("bigband-slack: starting socket-mode")
-			return runSocketMode(cfg, sm, sc, router)
+			return runSocketMode(ctx, cfg, sm, sc, router)
 		},
 	}
 }
@@ -78,7 +83,7 @@ func bigbandextClientFromEnv() (*bigbandext.Client, error) {
 // we react to Write, Create, and Rename events on the parent directory rather
 // than just a single Watch on the file path. After a Rename/Create cycle the
 // inode changes, and a re-add keeps subsequent events flowing.
-func watchConfigFile(router *Router) {
+func watchConfigFile(ctx context.Context, router *Router) {
 	path := ConfigPath()
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -98,6 +103,11 @@ func watchConfigFile(router *Router) {
 	const debounce = 200 * time.Millisecond
 	for {
 		select {
+		case <-ctx.Done():
+			if pending != nil {
+				pending.Stop()
+			}
+			return
 		case ev, ok := <-w.Events:
 			if !ok {
 				return
@@ -140,9 +150,9 @@ func reloadConfig(router *Router, source string) {
 		len(newCfg.Mirror), len(newCfg.TriggerChannels), newCfg.RetentionDuration(), newCfg.Threads.Enabled)
 }
 
-// runPruneLoop drops stale store entries at startup and once per hour.
-// Disabled when retention <= 0.
-func runPruneLoop(store *Store, retention time.Duration) {
+// runPruneLoop drops stale store entries at startup and once per hour until
+// ctx is cancelled. Disabled when retention <= 0.
+func runPruneLoop(ctx context.Context, store *Store, retention time.Duration) {
 	if retention <= 0 {
 		return
 	}
@@ -155,8 +165,13 @@ func runPruneLoop(store *Store, retention time.Duration) {
 	prune()
 	t := time.NewTicker(1 * time.Hour)
 	defer t.Stop()
-	for range t.C {
-		prune()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			prune()
+		}
 	}
 }
 
@@ -164,17 +179,24 @@ func runPruneLoop(store *Store, retention time.Duration) {
 // pkg/bigbandext.Client.Subscribe. Reconnects with backoff when the daemon
 // restarts; on each reconnect, asks the daemon to replay events from
 // `lastSeen` so nothing is missed across restarts. Dedups by EventID across
-// the process lifetime.
-func runSubscribeLoop(router *Router) {
+// the process lifetime. Returns when ctx is cancelled.
+func runSubscribeLoop(ctx context.Context, router *Router) {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
 	state := &subscribeState{seen: make(map[string]struct{})}
 	for {
-		err := streamOnce(router, state)
+		err := streamOnce(ctx, router, state)
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			log.Printf("bigband-slack: subscribe ended: %v (reconnecting in %s)", err, backoff)
 		}
-		time.Sleep(backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
 		backoff *= 2
 		if backoff > maxBackoff {
 			backoff = maxBackoff
@@ -187,7 +209,7 @@ type subscribeState struct {
 	seen     map[string]struct{}
 }
 
-func streamOnce(router *Router, st *subscribeState) error {
+func streamOnce(ctx context.Context, router *Router, st *subscribeState) error {
 	req := bigbandext.SubscribeRequest{
 		Name: "bigband-slack",
 		Types: []string{
@@ -202,9 +224,9 @@ func streamOnce(router *Router, st *subscribeState) error {
 	} else {
 		log.Printf("bigband-slack: subscribing live types=%v", req.Types)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	subCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	envCh, errCh := router.bb.Subscribe(ctx, req)
+	envCh, errCh := router.bb.Subscribe(subCtx, req)
 	log.Printf("bigband-slack: subscribed; awaiting events")
 	for {
 		select {

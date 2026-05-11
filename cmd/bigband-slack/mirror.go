@@ -26,9 +26,9 @@ import (
 // would have used.
 func newMirrorCmd() *cobra.Command {
 	var (
-		runID    string
-		channel  string
-		dryRun   bool
+		runID   string
+		channel string
+		dryRun  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "mirror <task-name>",

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -268,7 +269,7 @@ func appendTask(task map[string]any) error {
 	cfgPath := paths.Config()
 
 	// Ensure the config file exists with at least an empty tasks list.
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+	if _, err := os.Stat(cfgPath); errors.Is(err, os.ErrNotExist) {
 		if err := os.MkdirAll(paths.Root(), 0700); err != nil {
 			return err
 		}

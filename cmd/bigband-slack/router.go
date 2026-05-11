@@ -71,13 +71,7 @@ func (r *Router) HandleEvent(env bigbandext.Envelope) {
 		// Persist on the run mapping if we already have one, otherwise on the
 		// task mapping. Either way the thread reply path can find it.
 		_ = r.store.LinkTaskMeta(env.TaskName, "", "")
-		// Update the task's known session id.
-		r.store.mu.Lock()
-		prev := r.store.Tasks[env.TaskName]
-		prev.SessionID = data.SessionID
-		r.store.Tasks[env.TaskName] = prev
-		_ = r.store.save()
-		r.store.mu.Unlock()
+		_ = r.store.SetTaskSessionID(env.TaskName, data.SessionID)
 
 	case bigbandext.TypeTaskRunWorktreeReady:
 		var data bigbandext.TaskRunWorktreeReadyData
@@ -109,14 +103,7 @@ func (r *Router) handleCompleted(env bigbandext.Envelope) {
 	// Persist folder + worktree + session id under parentName so subsequent
 	// thread replies and status checks always see current values.
 	_ = r.store.LinkTaskMeta(parentName, data.Folder, data.WorktreePath)
-	if data.SessionID != "" {
-		r.store.mu.Lock()
-		prev := r.store.Tasks[parentName]
-		prev.SessionID = data.SessionID
-		r.store.Tasks[parentName] = prev
-		_ = r.store.save()
-		r.store.mu.Unlock()
-	}
+	_ = r.store.SetTaskSessionID(parentName, data.SessionID)
 
 	// A run is "slack-originated" when something on the Slack side recorded a
 	// run mapping with channel+thread for it — either submitOneOffRaw (top
@@ -406,4 +393,3 @@ func namedGroups(re *regexp.Regexp, match []string) map[string]string {
 	}
 	return out
 }
-

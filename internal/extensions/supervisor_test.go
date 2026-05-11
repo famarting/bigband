@@ -79,9 +79,6 @@ func waitFor(t *testing.T, timeout time.Duration, fn func() bool) bool {
 }
 
 func TestSupervisor_StartsAndStops(t *testing.T) {
-	SetHealthyThreshold(50 * time.Millisecond)
-	defer SetHealthyThreshold(30 * time.Second)
-
 	tmp := t.TempDir()
 	m := makeManifest(t, tmp, "alpha", `
 name: alpha
@@ -90,7 +87,7 @@ restart:
   policy: never
 `)
 	pub := &recordingPublisher{}
-	sup := NewSupervisor(tmp, pub, silentLogger())
+	sup := NewSupervisorWithHealthyThreshold(tmp, pub, silentLogger(), 50*time.Millisecond)
 	sup.Apply(m)
 
 	// Wait for the started event to fire.
@@ -122,9 +119,6 @@ restart:
 }
 
 func TestSupervisor_RestartsOnCrash(t *testing.T) {
-	SetHealthyThreshold(50 * time.Millisecond)
-	defer SetHealthyThreshold(30 * time.Second)
-
 	tmp := t.TempDir()
 	// Exit 1 immediately. The restart policy is on_failure (default).
 	m := makeManifest(t, tmp, "beta", `
@@ -137,7 +131,7 @@ restart:
   max_consecutive_failures: 3
 `)
 	pub := &recordingPublisher{}
-	sup := NewSupervisor(tmp, pub, silentLogger())
+	sup := NewSupervisorWithHealthyThreshold(tmp, pub, silentLogger(), 50*time.Millisecond)
 	sup.Apply(m)
 
 	// Should circuit-break after 3 failures and end FAILED.
@@ -178,9 +172,6 @@ restart:
 }
 
 func TestSupervisor_NeverRestartsOnSuccessWhenPolicyOnFailure(t *testing.T) {
-	SetHealthyThreshold(50 * time.Millisecond)
-	defer SetHealthyThreshold(30 * time.Second)
-
 	tmp := t.TempDir()
 	m := makeManifest(t, tmp, "gamma", `
 name: gamma
@@ -191,7 +182,7 @@ restart:
   max_backoff: 20ms
 `)
 	pub := &recordingPublisher{}
-	sup := NewSupervisor(tmp, pub, silentLogger())
+	sup := NewSupervisorWithHealthyThreshold(tmp, pub, silentLogger(), 50*time.Millisecond)
 	sup.Apply(m)
 
 	if !waitFor(t, 2*time.Second, func() bool {
@@ -213,9 +204,6 @@ restart:
 }
 
 func TestSupervisor_ApplyDisabledStops(t *testing.T) {
-	SetHealthyThreshold(50 * time.Millisecond)
-	defer SetHealthyThreshold(30 * time.Second)
-
 	tmp := t.TempDir()
 	m := makeManifest(t, tmp, "delta", `
 name: delta
@@ -224,7 +212,7 @@ restart:
   policy: never
 `)
 	pub := &recordingPublisher{}
-	sup := NewSupervisor(tmp, pub, silentLogger())
+	sup := NewSupervisorWithHealthyThreshold(tmp, pub, silentLogger(), 50*time.Millisecond)
 	sup.Apply(m)
 
 	if !waitFor(t, 2*time.Second, func() bool {
@@ -254,4 +242,3 @@ restart:
 		t.Fatalf("never reached stopped after disable; list=%+v", sup.List())
 	}
 }
-

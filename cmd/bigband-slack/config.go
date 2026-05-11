@@ -88,24 +88,24 @@ func (r MirrorRule) Patterns() []string {
 
 // TriggerChannel routes inbound Slack messages to bigband runs.
 type TriggerChannel struct {
-	Channel             string          `yaml:"channel"`
-	Folder              string          `yaml:"folder"`
-	RequireMention      bool            `yaml:"require_mention,omitempty"`
-	AllowFreeformPrompt bool            `yaml:"allow_freeform_prompt,omitempty"`
+	Channel             string           `yaml:"channel"`
+	Folder              string           `yaml:"folder"`
+	RequireMention      bool             `yaml:"require_mention,omitempty"`
+	AllowFreeformPrompt bool             `yaml:"allow_freeform_prompt,omitempty"`
 	Commands            []TriggerCommand `yaml:"commands,omitempty"`
 }
 
 // TriggerCommand maps a regex to an action.
 type TriggerCommand struct {
 	Match  string `yaml:"match"`
-	Action string `yaml:"action"` // run | submit
+	Action string `yaml:"action"`           // run | submit
 	Folder string `yaml:"folder,omitempty"` // override channel folder for this command
 }
 
 // ThreadConfig governs thread-reply behaviour.
 type ThreadConfig struct {
-	Enabled            bool `yaml:"enabled"`
-	ResumeWithSession  bool `yaml:"resume_with_session"`
+	Enabled           bool `yaml:"enabled"`
+	ResumeWithSession bool `yaml:"resume_with_session"`
 }
 
 // ConfigPath returns the canonical config path.

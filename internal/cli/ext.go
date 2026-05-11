@@ -59,12 +59,16 @@ func newExtListCmd() *cobra.Command {
 				return nil
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tSTATUS\tPID\tRESTARTS\tLAST EXIT\tMANIFEST")
+			fmt.Fprintln(w, "NAME\tSTATUS\tPID\tUPTIME\tRESTARTS\tLAST EXIT\tMANIFEST")
 			now := time.Now().UTC()
 			for _, e := range payload.Extensions {
 				pid := "-"
 				if e.PID > 0 {
 					pid = fmt.Sprint(e.PID)
+				}
+				uptime := "-"
+				if e.Status == string(extensions.StatusRunning) && !e.StartedAt.IsZero() {
+					uptime = now.Sub(e.StartedAt).Round(time.Second).String()
 				}
 				lastExit := "-"
 				if !e.LastExitAt.IsZero() {
@@ -73,8 +77,8 @@ func newExtListCmd() *cobra.Command {
 				} else if e.LastError != "" {
 					lastExit = e.LastError
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n",
-					e.Name, e.Status, pid, e.Restarts, lastExit, shortenPath(e.ManifestPath))
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+					e.Name, e.Status, pid, uptime, e.Restarts, lastExit, shortenPath(e.ManifestPath))
 			}
 			return w.Flush()
 		},

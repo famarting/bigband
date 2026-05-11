@@ -10,6 +10,7 @@ package launchd
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -167,7 +168,7 @@ func (s *Service) Uninstall() error {
 	_ = s.Stop()
 	_ = s.bootstrapUnload()
 	p := s.PlistPath()
-	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	fmt.Printf("Removed %s\n", p)

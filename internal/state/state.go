@@ -2,6 +2,7 @@ package state
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -51,7 +52,7 @@ type State struct {
 func Load() (*State, error) {
 	s := &State{path: paths.StateFile(), Tasks: map[string]*TaskState{}}
 	data, err := os.ReadFile(s.path)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
 	}
 	if err != nil {

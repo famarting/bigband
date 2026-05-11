@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,21 +15,22 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// tailFile streams new lines from f until EOF is stable (no new data).
-// For task logs it stops at the "=== END" marker; for the daemon log it runs
-// until the process is interrupted.
-func tailFile(f *os.File) error {
+// tailLines streams new lines from f as they appear, polling on EOF. When
+// stop is non-nil, the function returns once it returns true for any printed
+// line (used to terminate task-log follows at the "=== END" marker). When
+// stop is nil the loop runs until f returns a non-EOF error.
+func tailLines(f *os.File, stop func(string) bool) error {
 	fmt.Println("\n--- following ---")
 	r := bufio.NewReader(f)
 	for {
 		line, err := r.ReadString('\n')
 		if len(line) > 0 {
 			fmt.Print(line)
-			if strings.Contains(line, "=== END") {
+			if stop != nil && stop(line) {
 				return nil
 			}
 		}
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			time.Sleep(300 * time.Millisecond)
 			continue
 		}
@@ -36,6 +38,11 @@ func tailFile(f *os.File) error {
 			return err
 		}
 	}
+}
+
+// tailFile follows a task log until the runner's "=== END" marker.
+func tailFile(f *os.File) error {
+	return tailLines(f, func(line string) bool { return strings.Contains(line, "=== END") })
 }
 
 // waitAndFollowLog polls until a new log file appears for taskName, then
@@ -83,7 +90,7 @@ func NewLogsCmd() *cobra.Command {
 
 			entries, err := os.ReadDir(logDir)
 			if err != nil {
-				if os.IsNotExist(err) {
+				if errors.Is(err, os.ErrNotExist) {
 					return fmt.Errorf("no logs found for task %q", name)
 				}
 				return err

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -341,7 +342,7 @@ func addTemplateWizard(seed *config.Task) error {
 func appendTemplate(tmpl map[string]any) error {
 	cfgPath := paths.Config()
 
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+	if _, err := os.Stat(cfgPath); errors.Is(err, os.ErrNotExist) {
 		if err := os.MkdirAll(paths.Root(), 0700); err != nil {
 			return err
 		}

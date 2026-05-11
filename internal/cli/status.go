@@ -9,13 +9,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/famarting/bigband/internal/config"
 	"github.com/famarting/bigband/internal/ipc"
 	"github.com/famarting/bigband/internal/paths"
+	"github.com/famarting/bigband/internal/proc"
 	"github.com/famarting/bigband/internal/state"
 	"github.com/spf13/cobra"
 )
@@ -171,7 +171,7 @@ func collectRuns(st *state.State, tasks map[string]taskInfo) []runEntry {
 
 			active := false
 			if !hasEnd {
-				if isLatest && pidAlive(ts.RunningPID) {
+				if isLatest && proc.Alive(ts.RunningPID) {
 					active = true
 					status = "running"
 				} else {
@@ -245,15 +245,3 @@ func parseLogEnd(path string) (status, duration string, found bool) {
 	}
 	return "", "", false
 }
-
-func pidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscall.Signal(0)) == nil
-}
-

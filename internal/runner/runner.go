@@ -3,6 +3,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -218,7 +219,15 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 				}),
 			})
 			logger.Printf("claude scheduled wakeup in %s — sleeping before resuming session %s", delay.Round(time.Second), sessionID)
-			time.Sleep(delay)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				logger.Printf("cancelled during wakeup sleep — not resuming")
+				runErr = ctx.Err()
+			}
+			if runErr != nil {
+				break
+			}
 			remaining = time.Until(deadline)
 			sessionID, wakeup, msg, runErr = runClaude(ctx, flags, resumePrompt, sessionID, runDir, lf, out, remaining)
 			announceSession()
@@ -236,9 +245,9 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		if runErr != nil {
 			logger.Printf("claude failed: %v", runErr)
 			switch {
-			case ctx.Err() != nil:
+			case errors.Is(ctx.Err(), context.Canceled):
 				status = state.StatusStopped
-			case strings.Contains(runErr.Error(), "context deadline exceeded"):
+			case errors.Is(runErr, context.DeadlineExceeded):
 				status = state.StatusTimeout
 			default:
 				status = state.StatusFailed
@@ -496,7 +505,7 @@ func trimLogs(taskName string, retain int) {
 	sort.Strings(logs)
 	if len(logs) > retain {
 		for _, old := range logs[:len(logs)-retain] {
-			os.Remove(old)
+			_ = os.Remove(old)
 		}
 	}
 }

@@ -1,14 +1,16 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/slack-go/slack"
-	"github.com/slack-go/slack/socketmode"
 	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
 )
 
 // slackClient implements the Slack interface in router.go using slack-go/slack.
@@ -86,8 +88,8 @@ func (c *slackClient) PostMessage(channel, text, threadTS string) (string, error
 
 // runSocketMode blocks running the Slack socket-mode loop. Each Slack message
 // event is decoded into a SlackMessage and passed to the Router. The function
-// returns only on socket-mode termination or non-recoverable error.
-func runSocketMode(_ *Config, sm *socketmode.Client, sc *slackClient, router *Router) error {
+// returns when ctx is cancelled or on non-recoverable error.
+func runSocketMode(ctx context.Context, _ *Config, sm *socketmode.Client, sc *slackClient, router *Router) error {
 	go func() {
 		for evt := range sm.Events {
 			switch evt.Type {
@@ -142,21 +144,12 @@ func runSocketMode(_ *Config, sm *socketmode.Client, sc *slackClient, router *Ro
 			}
 		}
 	}()
-	return sm.Run()
+	return sm.RunContext(ctx)
 }
 
 func containsMention(text, uid string) bool {
 	if uid == "" {
 		return false
 	}
-	return contains(text, "<@"+uid+">")
-}
-
-func contains(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
+	return strings.Contains(text, "<@"+uid+">")
 }

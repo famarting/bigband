@@ -19,6 +19,43 @@ func RepoRoot(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// OriginPath returns the absolute path of the *primary* working tree containing
+// folder — i.e. the original repository, even if folder is inside a linked
+// worktree. For non-git folders it returns the absolute, symlink-resolved path
+// of folder itself. The returned path is suitable for matching against an
+// allowlist of source-of-truth roots.
+//
+// Implementation: `git rev-parse --git-common-dir` reports the .git directory
+// of the *primary* worktree (linked worktrees point back at it via the
+// commondir file). The parent of that directory is the primary working tree.
+// If the path doesn't resolve as a git repo, fall back to the resolved folder.
+func OriginPath(folder string) (string, error) {
+	abs, err := filepath.Abs(folder)
+	if err != nil {
+		return "", err
+	}
+	// EvalSymlinks fails if the path doesn't exist; in that case we still want
+	// a useful answer for the allowlist check at submit time, so fall back to
+	// the lexically-cleaned absolute path.
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		resolved = abs
+	}
+	out, err := exec.Command("git", "-C", resolved, "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return resolved, nil
+	}
+	commonDir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(resolved, commonDir)
+	}
+	primary := filepath.Dir(commonDir)
+	if primaryReal, err := filepath.EvalSymlinks(primary); err == nil {
+		primary = primaryReal
+	}
+	return primary, nil
+}
+
 // DefaultPath returns the conventional worktree path for a task:
 // a sibling of the repo root named <repo>-bb-<task>.
 func DefaultPath(repoRoot, taskName string) string {

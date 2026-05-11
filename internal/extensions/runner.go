@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -84,12 +85,11 @@ func spawnAndWait(ctx context.Context, m *Manifest, env map[string]string, logPa
 	exitedAt := time.Now().UTC()
 	res := runResult{pid: pid, startedAt: startedAt, exitedAt: exitedAt}
 
+	var ee *exec.ExitError
 	switch {
 	case waitErr == nil:
 		res.exitCode = 0
-	case errors.As(waitErr, new(*exec.ExitError)):
-		var ee *exec.ExitError
-		_ = errors.As(waitErr, &ee)
+	case errors.As(waitErr, &ee):
 		res.exitCode = ee.ExitCode()
 		// On macOS / Linux, signal-terminated processes report ExitCode == -1.
 		if status, ok := ee.Sys().(syscall.WaitStatus); ok && status.Signaled() {
@@ -128,15 +128,13 @@ func killProcessGroupOnCancel(c *exec.Cmd) {
 func mergeEnv(base []string, override map[string]string) []string {
 	merged := make(map[string]string, len(base)+len(override))
 	for _, kv := range base {
-		eq := indexEq(kv)
-		if eq < 0 {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
 			continue
 		}
-		merged[kv[:eq]] = kv[eq+1:]
-	}
-	for k, v := range override {
 		merged[k] = v
 	}
+	maps.Copy(merged, override)
 	keys := make([]string, 0, len(merged))
 	for k := range merged {
 		keys = append(keys, k)
@@ -148,17 +146,3 @@ func mergeEnv(base []string, override map[string]string) []string {
 	}
 	return out
 }
-
-// indexEq returns the index of the first '=' in kv, or -1.
-func indexEq(kv string) int {
-	for i := 0; i < len(kv); i++ {
-		if kv[i] == '=' {
-			return i
-		}
-	}
-	return -1
-}
-
-// discardWriter silences subprocess output. Reserved for future uses (e.g. a
-// "no log" manifest option). Currently unused.
-var _ io.Writer = io.Discard

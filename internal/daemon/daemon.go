@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,9 +29,18 @@ import (
 	"github.com/famarting/bigband/internal/extensions"
 	"github.com/famarting/bigband/internal/ipc"
 	"github.com/famarting/bigband/internal/paths"
+	"github.com/famarting/bigband/internal/proc"
 	"github.com/famarting/bigband/internal/runner"
 	"github.com/famarting/bigband/internal/scheduler"
 	"github.com/famarting/bigband/internal/state"
+)
+
+// IPC accept-loop limits. A local client should never need more than a fraction
+// of either: typical Cmds are <1 KiB and arrive immediately. The bounds exist
+// to keep a stuck or hostile peer from pinning a goroutine or growing memory.
+const (
+	ipcInitialReadTimeout = 5 * time.Second
+	ipcMaxCmdBytes        = 1 << 20 // 1 MiB
 )
 
 // Run is the daemon entrypoint.
@@ -42,6 +53,12 @@ func Run() error {
 		return err
 	}
 	defer os.Remove(paths.PidFile())
+
+	// Daemon-wide shutdown context: cancelled on SIGINT/SIGTERM. All long-lived
+	// goroutines started below derive from this so they exit cleanly when the
+	// daemon stops.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
 
 	// Tee daemon logs to file and stdout (launchd redirects stdout to the log
 	// file anyway, so this is always safe and makes `bigband daemon` watchable).
@@ -66,12 +83,17 @@ func Run() error {
 		st = &state.State{Tasks: map[string]*state.TaskState{}}
 	}
 
-	cfg, err := config.Load(paths.Config())
+	initialCfg, err := config.Load(paths.Config())
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	// cfgPtr holds the live config. The fsnotify-driven Watch callback below
+	// replaces it; readers (IPC handlers, prune loop) Load() to get a current
+	// snapshot. This avoids a data race on the bare local variable.
+	var cfgPtr atomic.Pointer[config.Config]
+	cfgPtr.Store(initialCfg)
 
-	reconcileOrphans(cfg, st)
+	reconcileOrphans(ctx, initialCfg, st)
 
 	bus, err := events.NewBus(paths.EventsFile())
 	if err != nil {
@@ -82,7 +104,8 @@ func Run() error {
 	// Mirror lifecycle events into the daemon log so operators can trace
 	// what's happening without tailing each per-task log file. The events
 	// JSONL file is still the structured ground truth; this is the human
-	// summary.
+	// summary. Goroutine exits when bus.Close (deferred above) closes the
+	// subscriber channel.
 	go logBusEvents(bus)
 
 	// Extension supervisor: spawns and watches every extension declared by a
@@ -104,9 +127,7 @@ func Run() error {
 
 	// Periodically prune ephemeral one-off entries (state + logs) older
 	// than the configured retention. Configured tasks are never pruned.
-	pruneStop := make(chan struct{})
-	go runPruneLoop(pruneStop, &cfg, st)
-	defer close(pruneStop)
+	go runPruneLoop(ctx, &cfgPtr, st)
 
 	started := time.Now()
 
@@ -159,11 +180,11 @@ func Run() error {
 	sched := scheduler.New(launchTask, func(name string) bool {
 		return st.Get(name).LastRun != nil
 	})
-	sched.Reload(cfg)
+	sched.Reload(cfgPtr.Load())
 
 	stopWatch, err := config.Watch(paths.Config(), func(newCfg *config.Config) {
 		log.Println("config reloaded")
-		cfg = newCfg
+		cfgPtr.Store(newCfg)
 		sched.Reload(newCfg)
 	})
 	if err != nil {
@@ -174,10 +195,19 @@ func Run() error {
 
 	stopIPC, err := ipc.Serve(func(conn net.Conn) {
 		defer conn.Close()
-		var cmd ipc.Cmd
-		if err := json.NewDecoder(conn).Decode(&cmd); err != nil {
+		// Bound the initial command read: a misbehaving or malicious local
+		// client must not be able to hold a connection open forever or stream
+		// an unbounded payload. After the command is parsed, the deadline is
+		// cleared because subscribe holds the connection open indefinitely
+		// and the other actions only write replies from here on.
+		if err := conn.SetReadDeadline(time.Now().Add(ipcInitialReadTimeout)); err != nil {
 			return
 		}
+		var cmd ipc.Cmd
+		if err := json.NewDecoder(io.LimitReader(conn, ipcMaxCmdBytes)).Decode(&cmd); err != nil {
+			return
+		}
+		_ = conn.SetReadDeadline(time.Time{})
 		// Subscribe holds the connection open and streams envelopes.
 		if cmd.Action == "subscribe" {
 			handleSubscribe(conn, cmd, bus)
@@ -204,7 +234,7 @@ func Run() error {
 			json.NewEncoder(conn).Encode(ipc.Reply{OK: true, Payload: raw}) //nolint:errcheck
 			return
 		}
-		reply := handleCmd(cmd, cfg, sched, st, started, launchTask, stopTask, sup)
+		reply := handleCmd(cmd, cfgPtr.Load(), sched, st, started, launchTask, stopTask, sup)
 		json.NewEncoder(conn).Encode(reply) //nolint:errcheck
 	})
 	if err != nil {
@@ -213,7 +243,7 @@ func Run() error {
 	defer stopIPC()
 
 	var scheduled, oneOff, disabled int
-	for _, t := range cfg.Tasks {
+	for _, t := range cfgPtr.Load().Tasks {
 		switch {
 		case !t.IsEnabled():
 			disabled++
@@ -225,9 +255,7 @@ func Run() error {
 	}
 	log.Printf("bigband daemon ready, %d scheduled, %d one-off, %d disabled", scheduled, oneOff, disabled)
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-	<-sig
+	<-ctx.Done()
 	log.Println("bigband daemon stopping")
 	sched.Stop()
 
@@ -523,7 +551,7 @@ func handleSubscribe(conn net.Conn, cmd ipc.Cmd, bus *events.Bus) {
 func streamReplay(enc *json.Encoder, filter events.Filter, since time.Time, seen map[string]struct{}) error {
 	f, err := os.Open(paths.EventsFile())
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil // no events yet — nothing to replay
 		}
 		return fmt.Errorf("open events file: %w", err)
@@ -554,19 +582,18 @@ func streamReplay(enc *json.Encoder, filter events.Filter, since time.Time, seen
 	return scanner.Err()
 }
 
-// runPruneLoop runs PruneEphemerals once at startup and then once per hour
-// until stop is closed. cfgRef is read each tick so config hot-reload (which
-// reassigns cfg) is picked up.
-func runPruneLoop(stop <-chan struct{}, cfgRef **config.Config, st *state.State) {
-	pruneOnce(*cfgRef, st)
+// runPruneLoop runs pruneOnce at startup and then once per hour until ctx is
+// cancelled. cfgPtr is loaded each tick so config hot-reload is picked up.
+func runPruneLoop(ctx context.Context, cfgPtr *atomic.Pointer[config.Config], st *state.State) {
+	pruneOnce(cfgPtr.Load(), st)
 	t := time.NewTicker(1 * time.Hour)
 	defer t.Stop()
 	for {
 		select {
-		case <-stop:
+		case <-ctx.Done():
 			return
 		case <-t.C:
-			pruneOnce(*cfgRef, st)
+			pruneOnce(cfgPtr.Load(), st)
 		}
 	}
 }
@@ -743,6 +770,9 @@ func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, _ *state.
 	if !info.IsDir() {
 		return nil, "", fmt.Errorf("submit: folder %q: not a directory", req.Folder)
 	}
+	if err := cfg.CheckFolderAllowed(req.Folder); err != nil {
+		return nil, "", fmt.Errorf("submit: %w", err)
+	}
 	if strings.TrimSpace(req.Prompt) == "" {
 		return nil, "", fmt.Errorf("submit: prompt is required")
 	}
@@ -798,14 +828,14 @@ func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, _ *state.
 	return t, runID, nil
 }
 
-func reconcileOrphans(cfg *config.Config, st *state.State) {
+func reconcileOrphans(ctx context.Context, cfg *config.Config, st *state.State) {
 	for _, task := range cfg.Tasks {
 		ts := st.Get(task.Name)
 		if ts.RunningPID == 0 {
 			continue
 		}
 		pid := ts.RunningPID
-		if pidAlive(pid) {
+		if proc.Alive(pid) {
 			log.Printf("bigband: task %q has orphaned process %d — holding lock until it exits", task.Name, pid)
 			release, acquired := state.Lock(task.Name)
 			if !acquired {
@@ -814,7 +844,10 @@ func reconcileOrphans(cfg *config.Config, st *state.State) {
 			}
 			go func(name string, pid int, release func()) {
 				defer release()
-				waitPID(pid)
+				waitPID(ctx, pid)
+				if ctx.Err() != nil {
+					return
+				}
 				log.Printf("bigband: orphaned process %d for task %q exited", pid, name)
 				if err := st.SetDone(name, state.StatusUnknown, 0, "", ""); err != nil {
 					log.Printf("bigband: state update failed for %q: %v", name, err)
@@ -829,19 +862,17 @@ func reconcileOrphans(cfg *config.Config, st *state.State) {
 	}
 }
 
-func pidAlive(pid int) bool {
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscall.Signal(0)) == nil
-}
-
-func waitPID(pid int) {
+func waitPID(ctx context.Context, pid int) {
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
 	for {
-		time.Sleep(5 * time.Second)
-		if !pidAlive(pid) {
+		select {
+		case <-ctx.Done():
 			return
+		case <-t.C:
+			if !proc.Alive(pid) {
+				return
+			}
 		}
 	}
 }

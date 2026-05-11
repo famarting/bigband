@@ -3,13 +3,21 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/famarting/bigband/internal/schedule"
+	"github.com/famarting/bigband/internal/worktree"
 	"gopkg.in/yaml.v3"
 )
+
+// folderOriginResolver returns the absolute primary working tree path for a
+// folder (see worktree.OriginPath). Stored as a var so tests can inject a
+// pure-path resolver and exercise CheckFolderAllowed without touching git.
+var folderOriginResolver = worktree.OriginPath
 
 var validName = regexp.MustCompile(`^[a-z0-9][a-z0-9\-_]*$`)
 
@@ -64,6 +72,12 @@ type Defaults struct {
 	// disables auto-pruning. Configured tasks (those in tasks:) are never
 	// touched. Default: 168h (7 days).
 	EphemeralRetention Duration `yaml:"ephemeral_retention"`
+	// AllowedFolders, when non-empty, restricts which directories tasks may
+	// run in. Each entry is a directory; a task's folder is permitted when its
+	// resolved primary working tree (i.e. the source-of-truth repo even when
+	// running inside a linked worktree) is equal to or a descendant of one of
+	// these entries. Empty list means no restriction (default).
+	AllowedFolders []string `yaml:"allowed_folders,omitempty"`
 }
 
 // Task is a single scheduled Claude Code job.
@@ -123,11 +137,16 @@ func (t *Task) ShouldUseWorktree() bool {
 // the run. Defaults to true — the worktree stays for inspection until the next
 // run starts, at which point CreateOrReplace discards it and creates a fresh
 // snapshot of HEAD. Set keep_worktree: false to remove it at run end instead.
+// reuse_worktree implies keep regardless of the explicit setting; without that
+// the next run would have nothing to reuse.
 func (t *Task) ShouldKeepWorktree() bool {
+	if t.ShouldReuseWorktree() {
+		return true
+	}
 	if t.KeepWorktree != nil {
 		return *t.KeepWorktree
 	}
-	return true || t.ShouldReuseWorktree()
+	return true
 }
 
 // ShouldReuseWorktree returns true when an existing worktree should be reused
@@ -294,11 +313,77 @@ func (c *Config) Validate() error {
 		if !info.IsDir() {
 			return fmt.Errorf("task %q folder %q: not a directory", t.Name, t.Folder)
 		}
+		if err := c.CheckFolderAllowed(t.Folder); err != nil {
+			return fmt.Errorf("task %q: %w", t.Name, err)
+		}
 		if strings.TrimSpace(t.Prompt) == "" {
 			return fmt.Errorf("task %q: prompt is required", t.Name)
 		}
 	}
 	return nil
+}
+
+// CheckFolderAllowed reports whether folder satisfies defaults.allowed_folders.
+// When the allowlist is empty the check is a no-op (returns nil). Otherwise
+// the folder is resolved to the *primary* working tree (so a worktree of an
+// allowed repo is itself allowed) and that path must be equal to or a
+// descendant of one of the allowed roots. Returns nil when allowed; a
+// descriptive error when denied or when resolution fails.
+func (c *Config) CheckFolderAllowed(folder string) error {
+	if len(c.Defaults.AllowedFolders) == 0 {
+		return nil
+	}
+	origin, err := folderOriginResolver(folder)
+	if err != nil {
+		return fmt.Errorf("resolving folder %q: %w", folder, err)
+	}
+	for _, root := range c.Defaults.AllowedFolders {
+		rootResolved, err := resolveAllowedRoot(root)
+		if err != nil {
+			// Skip an unresolvable allowlist entry rather than failing the
+			// check — log-only would be noisier than this. The other entries
+			// still get a chance to match.
+			continue
+		}
+		if pathContains(rootResolved, origin) {
+			return nil
+		}
+	}
+	return fmt.Errorf("folder %q (origin %q) is not under any defaults.allowed_folders entry", folder, origin)
+}
+
+// resolveAllowedRoot canonicalises an allowlist entry: absolute, with symlinks
+// resolved when possible. Returns the cleaned absolute path even if the entry
+// doesn't currently exist on disk.
+func resolveAllowedRoot(root string) (string, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, nil
+	}
+	return abs, nil
+}
+
+// pathContains reports whether child is equal to parent or located beneath it,
+// using lexical comparison after Clean. Both inputs must be absolute. Avoids
+// the false-positive in a naive HasPrefix where "/foo/bar" looks like a child
+// of "/foo/ba".
+func pathContains(parent, child string) bool {
+	parent = filepath.Clean(parent)
+	child = filepath.Clean(child)
+	if parent == child {
+		return true
+	}
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return !strings.HasPrefix(rel, "..") && rel != ".."
 }
 
 // Save writes the config back to path in YAML.
@@ -346,7 +431,7 @@ func (c *Config) FindTaskOrTemplate(name string) (*Task, string) {
 // EffectiveClaudeFlags returns the merged flag list for a task.
 // Core flags are always included. Model and effort follow task > global > omit.
 func (c *Config) EffectiveClaudeFlags(t *Task) []string {
-	flags := append([]string{}, coreClaudeFlags...)
+	flags := slices.Clone(coreClaudeFlags)
 	model := t.Model
 	if model == "" {
 		model = c.Defaults.Model

@@ -14,7 +14,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"os"
 	"sync"
 	"time"
@@ -122,17 +121,6 @@ func NewBus(path string) (*Bus, error) {
 	return &Bus{file: f}, nil
 }
 
-// NewBusWithWriter is the test-friendly constructor: it accepts any writer
-// instead of opening a file.
-func NewBusWithWriter(w io.Writer) *Bus {
-	if f, ok := w.(*os.File); ok {
-		return &Bus{file: f}
-	}
-	// We only support *os.File for v1 to keep Close semantics simple. Tests
-	// that need a writer can use os.CreateTemp.
-	return nil
-}
-
 // Close releases the underlying file handle. Safe to call multiple times.
 func (b *Bus) Close() error {
 	b.mu.Lock()
@@ -238,7 +226,7 @@ func (b *Bus) Subscribe(filter Filter, name string) (<-chan Envelope, func()) {
 }
 
 // MustData re-exports bigbandext.MustData for ergonomic in-package use.
-var MustData = bigbandext.MustData
+func MustData(v any) json.RawMessage { return bigbandext.MustData(v) }
 
 // newEventID returns a short random identifier suitable for event correlation.
 // 16 hex chars (~64 bits of entropy) is enough for human-scale event volumes.
