@@ -38,6 +38,24 @@ func completeTaskNames(cmd *cobra.Command, args []string, toComplete string) ([]
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
+// completeConfiguredTaskNames completes only tasks that exist in config.yaml
+// (i.e. excludes ephemeral state-only entries). Use for commands that operate
+// on config, such as edit, enable, and disable.
+func completeConfiguredTaskNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveDefault
+	}
+	cfg, _ := config.LoadUnvalidated(paths.Config())
+	if cfg == nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	names := make([]string, 0, len(cfg.Tasks))
+	for _, t := range cfg.Tasks {
+		names = append(names, t.Name)
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
+}
+
 // completeTemplateNames completes configured template names.
 func completeTemplateNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) > 0 {

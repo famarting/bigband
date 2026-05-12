@@ -131,6 +131,13 @@ type TaskStatus struct {
 	Folder       string `json:"folder,omitempty"`
 	WorktreeMode string `json:"worktree_mode,omitempty"`
 	Ephemeral    bool   `json:"ephemeral,omitempty"`
+	// SessionID is the Claude session id from the task's most recent run, or
+	// empty when the task has never produced one. Extensions building on top
+	// of a task (e.g. workflow promotion) need this to followup.
+	SessionID string `json:"session_id,omitempty"`
+	// Prompt is the configured prompt body for the task. Populated for
+	// configured tasks only; ephemeral submissions don't retain their prompt.
+	Prompt string `json:"prompt,omitempty"`
 }
 
 // StatusReply is the payload of a successful Status reply.

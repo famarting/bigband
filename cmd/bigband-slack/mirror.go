@@ -48,10 +48,13 @@ func newMirrorCmd() *cobra.Command {
 
 			rule := cfg.MatchTask(taskName)
 			if rule == nil {
-				rule = &MirrorRule{OnFailure: true, IncludeStatus: true, OpenThread: true}
 				if channel == "" {
 					return fmt.Errorf("no mirror rule matches %q — pass --channel to override, or add a rule with `bigband-slack enable %s --channel ...`", taskName, taskName)
 				}
+				// No config rule matched; synthesise a minimal one so formatCompletion
+				// has sensible defaults. Only IncludeStatus is read by this code path —
+				// OnFailure and OpenThread are not checked by the mirror command.
+				rule = &MirrorRule{IncludeStatus: true}
 			}
 			postChannel := channel
 			if postChannel == "" {

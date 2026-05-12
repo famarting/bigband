@@ -23,8 +23,9 @@ func newTriggerCmd() *cobra.Command {
 
 func newTriggerListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List configured trigger channels",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List configured trigger channels",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := LoadConfig()
 			if err != nil {

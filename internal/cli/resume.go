@@ -6,8 +6,6 @@ import (
 	"os/exec"
 	"syscall"
 
-	"github.com/famarting/bigband/internal/config"
-	"github.com/famarting/bigband/internal/paths"
 	"github.com/famarting/bigband/internal/state"
 	"github.com/spf13/cobra"
 )
@@ -36,14 +34,6 @@ func resumeTask(name string) error {
 	}
 	if _, err := os.Stat(ts.WorktreePath); err != nil {
 		return fmt.Errorf("worktree %s no longer exists on disk — use 'bigband worktree rm %s' to clear the stale reference", ts.WorktreePath, name)
-	}
-
-	cfg, err := config.Load(paths.Config())
-	if err != nil {
-		return err
-	}
-	if cfg.TaskByName(name) == nil {
-		return fmt.Errorf("task %q not found in config", name)
 	}
 
 	var claudeArgs []string

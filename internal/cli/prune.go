@@ -9,6 +9,7 @@ import (
 	"github.com/famarting/bigband/internal/ipc"
 	"github.com/famarting/bigband/internal/paths"
 	"github.com/famarting/bigband/internal/state"
+	"github.com/famarting/bigband/internal/worktree"
 	"github.com/spf13/cobra"
 )
 
@@ -56,13 +57,31 @@ func NewPruneCmd() *cobra.Command {
 			}
 
 			// Find candidates without mutating yet (so dry-run is honest).
-			var candidates []string
+			// Snapshot Folder + WorktreePath here so we can clean up the
+			// worktree after the state row is removed (forget IPC and
+			// RemoveTask both drop the row without touching disk).
+			type candidate struct {
+				name         string
+				folder       string
+				worktreePath string
+			}
+			var candidates []candidate
 			for name, ts := range st.Tasks {
 				if configured[name] || ts == nil || ts.RunningPID != 0 {
 					continue
 				}
+				// Respect keep_worktree — owners (e.g. bigband-workflows) rely on
+				// the worktree surviving past the run's completion. Skip auto-pruning
+				// these; they require an explicit `bigband rm`.
+				if ts.KeepWorktree && ts.WorktreePath != "" {
+					continue
+				}
 				if ts.LastRun == nil || ts.LastRun.Before(cutoff) {
-					candidates = append(candidates, name)
+					candidates = append(candidates, candidate{
+						name:         name,
+						folder:       ts.Folder,
+						worktreePath: ts.WorktreePath,
+					})
 				}
 			}
 			if len(candidates) == 0 {
@@ -71,8 +90,12 @@ func NewPruneCmd() *cobra.Command {
 			}
 			if dryRun {
 				fmt.Printf("would prune %d ephemeral task(s) older than %s:\n", len(candidates), cutoff.Format(time.RFC3339))
-				for _, n := range candidates {
-					fmt.Printf("  %s\n", n)
+				for _, c := range candidates {
+					if c.worktreePath != "" {
+						fmt.Printf("  %s (worktree %s)\n", c.name, c.worktreePath)
+					} else {
+						fmt.Printf("  %s\n", c.name)
+					}
 				}
 				return nil
 			}
@@ -83,28 +106,31 @@ func NewPruneCmd() *cobra.Command {
 			}
 
 			pruned := 0
-			for _, name := range candidates {
+			for _, c := range candidates {
 				if daemonUp {
-					reply, err := ipc.Send(ipc.Cmd{Action: "forget", Task: name})
+					reply, err := ipc.Send(ipc.Cmd{Action: "forget", Task: c.name})
 					if err != nil {
-						fmt.Printf("warning: forget %s: %v\n", name, err)
+						fmt.Printf("warning: forget %s: %v\n", c.name, err)
 						continue
 					}
 					if !reply.OK {
-						fmt.Printf("warning: forget %s rejected: %s\n", name, reply.Error)
+						fmt.Printf("warning: forget %s rejected: %s\n", c.name, reply.Error)
 						continue
 					}
 				} else {
-					if err := st.RemoveTask(name); err != nil {
-						fmt.Printf("warning: remove state %s: %v\n", name, err)
+					if err := st.RemoveTask(c.name); err != nil {
+						fmt.Printf("warning: remove state %s: %v\n", c.name, err)
 						continue
 					}
 				}
 				if !keepLogs {
-					dir := paths.TaskLogDir(name)
+					dir := paths.TaskLogDir(c.name)
 					if err := os.RemoveAll(dir); err != nil {
 						fmt.Printf("warning: remove logs %s: %v\n", dir, err)
 					}
+				}
+				if c.worktreePath != "" {
+					removeEphemeralWorktree(c.name, c.folder, c.worktreePath)
 				}
 				pruned++
 			}
@@ -116,4 +142,28 @@ func NewPruneCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&keepLogs, "keep-logs", false, "keep log directories (default: remove them)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "list candidates without removing anything")
 	return cmd
+}
+
+// removeEphemeralWorktree deletes the worktree an ephemeral task owned. Only
+// invoked for ephemerals (configured tasks are filtered out upstream), and
+// worktree.Remove guards against a stray path: it requires the basename to
+// match "<repo>-bb-<task>" and sit as a sibling of the repo root.
+func removeEphemeralWorktree(name, folder, wtPath string) {
+	if folder == "" {
+		fmt.Printf("warning: cannot remove worktree %s for %s: no recorded folder\n", wtPath, name)
+		return
+	}
+	if _, err := os.Stat(wtPath); err != nil {
+		return
+	}
+	repoRoot, err := worktree.RepoRoot(folder)
+	if err != nil {
+		fmt.Printf("warning: cannot remove worktree %s for %s: %v\n", wtPath, name, err)
+		return
+	}
+	if err := worktree.Remove(repoRoot, wtPath); err != nil {
+		fmt.Printf("warning: remove worktree %s for %s: %v\n", wtPath, name, err)
+		return
+	}
+	fmt.Printf("removed worktree %s\n", wtPath)
 }

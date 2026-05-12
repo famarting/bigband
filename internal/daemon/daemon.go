@@ -33,6 +33,7 @@ import (
 	"github.com/famarting/bigband/internal/runner"
 	"github.com/famarting/bigband/internal/scheduler"
 	"github.com/famarting/bigband/internal/state"
+	"github.com/famarting/bigband/internal/worktree"
 )
 
 // IPC accept-loop limits. A local client should never need more than a fraction
@@ -186,6 +187,11 @@ func Run() error {
 		log.Println("config reloaded")
 		cfgPtr.Store(newCfg)
 		sched.Reload(newCfg)
+		bus.Publish(events.Envelope{
+			Type:   events.TypeConfigReloaded,
+			Source: events.SourceDaemon,
+			Data:   events.MustData(configReloadedPayload(newCfg)),
+		})
 	})
 	if err != nil {
 		log.Printf("WARNING: cannot watch config: %v", err)
@@ -230,12 +236,20 @@ func Run() error {
 					LagDropped:  s.LagDropped,
 				})
 			}
-			raw, _ := json.Marshal(ipc.SubscribersReply{Subscribers: out})
-			json.NewEncoder(conn).Encode(ipc.Reply{OK: true, Payload: raw}) //nolint:errcheck
+			raw, err := json.Marshal(ipc.SubscribersReply{Subscribers: out})
+			if err != nil {
+				_ = json.NewEncoder(conn).Encode(ipc.Reply{OK: false, Error: "marshal subscribers: " + err.Error()})
+				return
+			}
+			if err := json.NewEncoder(conn).Encode(ipc.Reply{OK: true, Payload: raw}); err != nil {
+				log.Printf("bigband: ipc encode subscribers reply: %v", err)
+			}
 			return
 		}
 		reply := handleCmd(cmd, cfgPtr.Load(), sched, st, started, launchTask, stopTask, sup)
-		json.NewEncoder(conn).Encode(reply) //nolint:errcheck
+		if err := json.NewEncoder(conn).Encode(reply); err != nil {
+			log.Printf("bigband: ipc encode reply action=%s: %v", cmd.Action, err)
+		}
 	})
 	if err != nil {
 		return fmt.Errorf("starting IPC: %w", err)
@@ -281,6 +295,30 @@ func Run() error {
 	return nil
 }
 
+// configReloadedPayload builds the ConfigReloadedData payload from a parsed
+// config snapshot. Counts mirror the daemon's startup summary so subscribers
+// can log a meaningful line on every reload without re-parsing the file.
+func configReloadedPayload(cfg *config.Config) events.ConfigReloadedData {
+	var scheduled, oneOff, disabled int
+	for _, t := range cfg.Tasks {
+		switch {
+		case !t.IsEnabled():
+			disabled++
+		case t.IsOneOff():
+			oneOff++
+		default:
+			scheduled++
+		}
+	}
+	return events.ConfigReloadedData{
+		TaskCount:      len(cfg.Tasks),
+		ScheduledCount: scheduled,
+		OneOffCount:    oneOff,
+		DisabledCount:  disabled,
+		TemplatesCount: len(cfg.Templates),
+	}
+}
+
 func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *state.State, started time.Time, runTask func(*config.Config, *config.Task), stopTask func(string) bool, sup *extensions.Supervisor) ipc.Reply {
 	switch cmd.Action {
 	case "ping":
@@ -320,6 +358,8 @@ func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *
 				WorktreePath: ts.WorktreePath,
 				Folder:       t.Folder,
 				WorktreeMode: t.WorktreeMode(),
+				SessionID:    ts.SessionID,
+				Prompt:       t.Prompt,
 			})
 		}
 		// Surface ephemeral submissions (state-only — never made it into
@@ -352,13 +392,17 @@ func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *
 				WorktreePath: ts.WorktreePath,
 				Folder:       ts.Folder,
 				Ephemeral:    true,
+				SessionID:    ts.SessionID,
 			})
 		}
 		payload := ipc.StatusPayload{
 			Uptime: time.Since(started).Round(time.Second).String(),
 			Tasks:  tasks,
 		}
-		raw, _ := json.Marshal(payload)
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return ipc.Reply{OK: false, Error: "marshal status: " + err.Error()}
+		}
 		return ipc.Reply{OK: true, Payload: raw}
 
 	case "run":
@@ -373,11 +417,6 @@ func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *
 		return ipc.Reply{OK: true}
 
 	case "stop":
-		t := cfg.TaskByName(cmd.Task)
-		if t == nil {
-			log.Printf("bigband: ipc stop task=%s rejected: unknown", cmd.Task)
-			return ipc.Reply{OK: false, Error: "unknown task: " + cmd.Task}
-		}
 		if !stopTask(cmd.Task) {
 			log.Printf("bigband: ipc stop task=%s rejected: not running", cmd.Task)
 			return ipc.Reply{OK: false, Error: "task " + cmd.Task + " is not running"}
@@ -413,11 +452,16 @@ func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *
 		}
 		log.Printf("bigband: ipc submit task=%s folder=%s parent_session=%q triggered_by=%q ephemeral=%v",
 			t.Name, t.Folder, cmd.Submit.ParentSessionID, cmd.Submit.TriggeredBy, cmd.Submit.Ephemeral)
+		logPath := filepath.Join(paths.TaskLogDir(t.Name), t.RunTimestamp+".log")
 		runTask(cfg, t)
-		raw, _ := json.Marshal(ipc.SubmitRunReply{
+		raw, err := json.Marshal(ipc.SubmitRunReply{
 			RunID:    runID,
 			TaskName: t.Name,
+			LogPath:  logPath,
 		})
+		if err != nil {
+			return ipc.Reply{OK: false, Error: "marshal submit reply: " + err.Error()}
+		}
 		return ipc.Reply{OK: true, Payload: raw}
 
 	case "ext_list":
@@ -439,7 +483,10 @@ func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *
 				LogPath:      v.LogPath,
 			})
 		}
-		raw, _ := json.Marshal(ipc.ExtListReply{Extensions: out})
+		raw, err := json.Marshal(ipc.ExtListReply{Extensions: out})
+		if err != nil {
+			return ipc.Reply{OK: false, Error: "marshal ext_list: " + err.Error()}
+		}
 		return ipc.Reply{OK: true, Payload: raw}
 
 	case "ext_start":
@@ -598,8 +645,8 @@ func runPruneLoop(ctx context.Context, cfgPtr *atomic.Pointer[config.Config], st
 	}
 }
 
-// pruneOnce removes ephemeral state entries (and their log dirs) older than
-// the configured retention. No-op when retention is zero.
+// pruneOnce removes ephemeral state entries (and their log dirs + worktrees)
+// older than the configured retention. No-op when retention is zero.
 func pruneOnce(cfg *config.Config, st *state.State) {
 	if cfg == nil {
 		return
@@ -611,13 +658,42 @@ func pruneOnce(cfg *config.Config, st *state.State) {
 	cutoff := time.Now().Add(-retention)
 	configured := configuredNames(cfg)
 	removed := st.RemoveStaleEphemerals(configured, cutoff)
-	for _, name := range removed {
-		dir := paths.TaskLogDir(name)
+	for _, r := range removed {
+		dir := paths.TaskLogDir(r.Name)
 		if err := os.RemoveAll(dir); err != nil {
 			log.Printf("bigband: prune logs %s: %v", dir, err)
 		}
-		log.Printf("bigband: pruned ephemeral task=%s (last_run before %s)", name, cutoff.Format(time.RFC3339))
+		if r.WorktreePath != "" {
+			pruneEphemeralWorktree(r)
+		}
+		log.Printf("bigband: pruned ephemeral task=%s (last_run before %s)", r.Name, cutoff.Format(time.RFC3339))
 	}
+}
+
+// pruneEphemeralWorktree removes the worktree that an ephemeral task owned.
+// Configured tasks never reach this code path — RemoveStaleEphemerals filters
+// them out — so the only worktrees touched here are <repo>-bb-<oneoff-...>
+// dirs created by the ephemeral that's being pruned. worktree.Remove enforces
+// its own guardrails (sibling-of-repo-root + "<repo>-bb-" basename prefix), so
+// a corrupted state.json cannot weaponise this path.
+func pruneEphemeralWorktree(r state.RemovedEphemeral) {
+	if r.Folder == "" {
+		log.Printf("bigband: prune worktree %s for task=%s skipped: no recorded folder, cannot resolve repo root", r.WorktreePath, r.Name)
+		return
+	}
+	repoRoot, err := worktree.RepoRoot(r.Folder)
+	if err != nil {
+		log.Printf("bigband: prune worktree %s for task=%s skipped: %v", r.WorktreePath, r.Name, err)
+		return
+	}
+	if _, err := os.Stat(r.WorktreePath); err != nil {
+		return
+	}
+	if err := worktree.Remove(repoRoot, r.WorktreePath); err != nil {
+		log.Printf("bigband: prune worktree %s for task=%s: %v", r.WorktreePath, r.Name, err)
+		return
+	}
+	log.Printf("bigband: pruned worktree %s for task=%s", r.WorktreePath, r.Name)
 }
 
 // configuredNames returns the set of task and template names from cfg, used
@@ -741,6 +817,11 @@ func summarizeEvent(env events.Envelope) string {
 		var d events.ExtensionFailedData
 		_ = json.Unmarshal(env.Data, &d)
 		return "name=" + d.Name + " error=" + quote(d.Error)
+	case events.TypeConfigReloaded:
+		var d events.ConfigReloadedData
+		_ = json.Unmarshal(env.Data, &d)
+		return fmt.Sprintf("tasks=%d scheduled=%d one_off=%d disabled=%d templates=%d",
+			d.TaskCount, d.ScheduledCount, d.OneOffCount, d.DisabledCount, d.TemplatesCount)
 	}
 	return ""
 }
@@ -759,7 +840,7 @@ func quote(s string) string {
 // The returned task is never persisted to config.yaml — Ephemeral=true marks
 // it so callers (e.g. config.Save) can skip it. State entries created during
 // the run still land in state.json so logs and follow-ups remain addressable.
-func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, _ *state.State) (*config.Task, string, error) {
+func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, st *state.State) (*config.Task, string, error) {
 	if req.Folder == "" {
 		return nil, "", fmt.Errorf("submit: folder is required")
 	}
@@ -796,6 +877,11 @@ func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, _ *state.
 	if cfg.TaskByName(name) != nil {
 		return nil, "", fmt.Errorf("submit: name %q collides with an existing configured task", name)
 	}
+	// Also reject if an ephemeral with this name is already running — two
+	// concurrent runs sharing a name would clobber each other's state slot.
+	if st.Get(name).RunningPID != 0 {
+		return nil, "", fmt.Errorf("submit: name %q collides with a currently running task", name)
+	}
 
 	// Pin the run timestamp now so the synchronously-returned run id matches
 	// the one the runner emits on lifecycle events (it'll use this same ts as
@@ -829,35 +915,49 @@ func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, _ *state.
 }
 
 func reconcileOrphans(ctx context.Context, cfg *config.Config, st *state.State) {
+	configured := map[string]bool{}
 	for _, task := range cfg.Tasks {
-		ts := st.Get(task.Name)
-		if ts.RunningPID == 0 {
-			continue
+		configured[task.Name] = true
+		reconcileOrphan(ctx, task.Name, st)
+	}
+	// Also sweep ephemeral state entries that were running when the daemon last
+	// stopped. Without this, a crashed ephemeral task keeps RunningPID set
+	// forever, making it appear "running" and blocking forget/rm.
+	for name := range st.Tasks {
+		if !configured[name] {
+			reconcileOrphan(ctx, name, st)
 		}
-		pid := ts.RunningPID
-		if proc.Alive(pid) {
-			log.Printf("bigband: task %q has orphaned process %d — holding lock until it exits", task.Name, pid)
-			release, acquired := state.Lock(task.Name)
-			if !acquired {
-				log.Printf("bigband: WARNING could not hold lock for orphan task %q", task.Name)
-				continue
+	}
+}
+
+func reconcileOrphan(ctx context.Context, name string, st *state.State) {
+	ts := st.Get(name)
+	if ts.RunningPID == 0 {
+		return
+	}
+	pid := ts.RunningPID
+	if proc.Alive(pid) {
+		log.Printf("bigband: task %q has orphaned process %d — holding lock until it exits", name, pid)
+		release, acquired := state.Lock(name)
+		if !acquired {
+			log.Printf("bigband: WARNING could not hold lock for orphan task %q", name)
+			return
+		}
+		go func(name string, pid int, release func()) {
+			defer release()
+			waitPID(ctx, pid)
+			if ctx.Err() != nil {
+				return
 			}
-			go func(name string, pid int, release func()) {
-				defer release()
-				waitPID(ctx, pid)
-				if ctx.Err() != nil {
-					return
-				}
-				log.Printf("bigband: orphaned process %d for task %q exited", pid, name)
-				if err := st.SetDone(name, state.StatusUnknown, 0, "", ""); err != nil {
-					log.Printf("bigband: state update failed for %q: %v", name, err)
-				}
-			}(task.Name, pid, release)
-		} else {
-			log.Printf("bigband: clearing stale running state for task %q (pid %d gone)", task.Name, pid)
-			if err := st.SetDone(task.Name, state.StatusUnknown, 0, "", ""); err != nil {
-				log.Printf("bigband: state update failed for %q: %v", task.Name, err)
+			log.Printf("bigband: orphaned process %d for task %q exited", pid, name)
+			if err := st.SetDone(name, state.StatusStopped, 0, "", ""); err != nil {
+				log.Printf("bigband: state update failed for %q: %v", name, err)
 			}
+		}(name, pid, release)
+	} else {
+		log.Printf("bigband: clearing stale running state for task %q (pid %d gone)", name, pid)
+		if err := st.SetDone(name, state.StatusUnknown, 0, "", ""); err != nil {
+			log.Printf("bigband: state update failed for %q: %v", name, err)
 		}
 	}
 }

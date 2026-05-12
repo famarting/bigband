@@ -92,3 +92,14 @@ type ExtensionFailedData struct {
 	Name  string `json:"name"`
 	Error string `json:"error"`
 }
+
+// ConfigReloadedData accompanies TypeConfigReloaded. The counts are a quick
+// observability signal for subscribers; the canonical config remains
+// ~/.bigband-tasks/config.yaml.
+type ConfigReloadedData struct {
+	TaskCount       int `json:"task_count"`
+	ScheduledCount  int `json:"scheduled_count"`
+	OneOffCount     int `json:"one_off_count"`
+	DisabledCount   int `json:"disabled_count"`
+	TemplatesCount  int `json:"templates_count,omitempty"`
+}

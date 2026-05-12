@@ -41,6 +41,13 @@ const (
 	TypeExtensionStarted Type = "extension.started"
 	TypeExtensionExited  Type = "extension.exited"
 	TypeExtensionFailed  Type = "extension.failed"
+
+	// TypeConfigReloaded is emitted by the daemon every time
+	// ~/.bigband-tasks/config.yaml is parsed successfully after an fsnotify
+	// change. Extensions that maintain derived state (e.g. wake schedules,
+	// routing tables) subscribe to it to reconcile without polling. Payload:
+	// ConfigReloadedData.
+	TypeConfigReloaded Type = "config.reloaded"
 )
 
 // Source labels who triggered the run, for traceability.

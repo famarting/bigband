@@ -310,7 +310,7 @@ func NewEditCmd() *cobra.Command {
 		Use:               "edit [name]",
 		Short:             "Edit a task (or the whole config) in $EDITOR",
 		Args:              cobra.MaximumNArgs(1),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeConfiguredTaskNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return openEditor(paths.Config())
@@ -416,7 +416,7 @@ func NewEnableCmd() *cobra.Command {
 		Use:               "enable <name>",
 		Short:             "Enable a task",
 		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeConfiguredTaskNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return setEnabled(args[0], true)
 		},
@@ -428,7 +428,7 @@ func NewDisableCmd() *cobra.Command {
 		Use:               "disable <name>",
 		Short:             "Disable a task",
 		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeConfiguredTaskNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return setEnabled(args[0], false)
 		},

@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -27,6 +28,7 @@ type slackClient struct {
 
 	chMu         sync.Mutex
 	channelNames map[string]string
+	failureCache map[string]time.Time // channel id → time of last failed lookup
 }
 
 func newSlackClient(cfg *Config) (*slackClient, *socketmode.Client, error) {
@@ -44,12 +46,14 @@ func newSlackClient(cfg *Config) (*slackClient, *socketmode.Client, error) {
 		return nil, nil, fmt.Errorf("slack auth: %w", err)
 	}
 	sm := socketmode.New(api)
-	return &slackClient{api: api, botUID: auth.UserID, channelNames: map[string]string{}}, sm, nil
+	return &slackClient{api: api, botUID: auth.UserID, channelNames: map[string]string{}, failureCache: map[string]time.Time{}}, sm, nil
 }
 
 // channelName returns the name of the given channel ID, hitting Slack's
 // conversations.info endpoint on cache miss. Returns "" when lookup fails
 // (insufficient scopes, archived, DM, etc.) — callers fall back to ID match.
+// Repeated failures are suppressed for 5 minutes via a failure cache so a
+// bad channel ID doesn't hammer the Slack API.
 func (c *slackClient) channelName(id string) string {
 	if id == "" {
 		return ""
@@ -59,14 +63,22 @@ func (c *slackClient) channelName(id string) string {
 		c.chMu.Unlock()
 		return n
 	}
+	if t, ok := c.failureCache[id]; ok && time.Since(t) < 5*time.Minute {
+		c.chMu.Unlock()
+		return ""
+	}
 	c.chMu.Unlock()
 	info, err := c.api.GetConversationInfo(&slack.GetConversationInfoInput{ChannelID: id})
 	if err != nil {
 		log.Printf("bigband-slack: cannot resolve channel %s: %v", id, err)
+		c.chMu.Lock()
+		c.failureCache[id] = time.Now()
+		c.chMu.Unlock()
 		return ""
 	}
 	c.chMu.Lock()
 	c.channelNames[id] = info.Name
+	delete(c.failureCache, id)
 	c.chMu.Unlock()
 	return info.Name
 }

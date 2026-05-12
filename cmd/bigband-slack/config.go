@@ -64,13 +64,13 @@ func (s SlackAuth) ResolvedBotToken() string { return s.resolvedBot }
 // channel". Either Task (single name/glob) or Tasks (list) must be set.
 // First matching rule wins. Set Enabled=false to opt out.
 type MirrorRule struct {
-	Task          string   `yaml:"task,omitempty"`
-	Tasks         []string `yaml:"tasks,omitempty"`
-	Channel       string   `yaml:"channel,omitempty"`
-	OpenThread    bool     `yaml:"open_thread,omitempty"`
-	IncludeStatus bool     `yaml:"include_status,omitempty"`
-	OnFailure     bool     `yaml:"on_failure,omitempty"`
-	Enabled       *bool    `yaml:"enabled,omitempty"`
+	Task         string   `yaml:"task,omitempty"`
+	Tasks        []string `yaml:"tasks,omitempty"`
+	Channel      string   `yaml:"channel,omitempty"`
+	AllowReplies bool     `yaml:"allow_replies,omitempty"`
+	IncludeStatus bool    `yaml:"include_status,omitempty"`
+	OnFailure    bool     `yaml:"on_failure,omitempty"`
+	Enabled      *bool    `yaml:"enabled,omitempty"`
 }
 
 // IsEnabled returns true when the rule is enabled (default true).

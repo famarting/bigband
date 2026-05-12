@@ -218,7 +218,7 @@ bigband validate
 | `bigband template add [--from <name>]` | Add a template via interactive wizard |
 | `bigband template edit <name>` | Edit a template's YAML in `$EDITOR` |
 | `bigband template rm <name>` | Remove a template |
-| `bigband template show <name>` | Print a template's full definition |
+| `bigband template get <name>` | Print a template's full definition |
 | `bigband template save <task> [--as <name>]` | Save an existing task as a template (drops `schedule` and `enabled`) |
 
 ### Running

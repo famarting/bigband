@@ -13,8 +13,9 @@ func newRulesCmd() *cobra.Command {
 		Short: "Mirror rule operations",
 	}
 	cmd.AddCommand(&cobra.Command{
-		Use:   "list",
-		Short: "List configured mirror rules",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List configured mirror rules",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := LoadConfig()
 			if err != nil {
@@ -33,7 +34,7 @@ func newRulesCmd() *cobra.Command {
 				if !r.IsEnabled() {
 					enabled = "disabled"
 				}
-				fmt.Printf("[%d] %s → %s (%s, thread=%v)\n", i, strings.Join(patterns, ","), r.Channel, enabled, r.OpenThread)
+				fmt.Printf("[%d] %s → %s (%s, allow_replies=%v)\n", i, strings.Join(patterns, ","), r.Channel, enabled, r.AllowReplies)
 			}
 			return nil
 		},
@@ -66,10 +67,10 @@ func newEnableCmd() *cobra.Command {
 			}
 			t := true
 			out = append(out, MirrorRule{
-				Task:       name,
-				Channel:    channel,
-				OpenThread: thread,
-				Enabled:    &t,
+				Task:         name,
+				Channel:      channel,
+				AllowReplies: thread,
+				Enabled:      &t,
 			})
 			cfg.Mirror = out
 			if err := SaveConfig(cfg); err != nil {

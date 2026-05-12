@@ -26,7 +26,7 @@ never scheduled. Use them as a starting point for new tasks via
 		newTemplateAddCmd(),
 		newTemplateEditCmd(),
 		newTemplateRmCmd(),
-		newTemplateShowCmd(),
+		newTemplateGetCmd(),
 		newTemplateSaveCmd(),
 	)
 	return cmd
@@ -167,10 +167,10 @@ func newTemplateRmCmd() *cobra.Command {
 	}
 }
 
-func newTemplateShowCmd() *cobra.Command {
+func newTemplateGetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:               "show <name>",
-		Short:             "Show a template's full definition",
+		Use:               "get <name>",
+		Short:             "Print a template's full definition",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeTemplateNames,
 		RunE: func(cmd *cobra.Command, args []string) error {

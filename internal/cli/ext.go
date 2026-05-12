@@ -40,8 +40,9 @@ func NewExtCmd() *cobra.Command {
 
 func newExtListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List extensions supervised by the daemon",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List extensions supervised by the daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reply, err := ipc.Send(ipc.Cmd{Action: "ext_list"})
 			if err != nil {

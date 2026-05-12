@@ -231,7 +231,7 @@ func defaultDefaults() Defaults {
 		Shell:              "/bin/sh",
 		Timeout:            Duration{45 * time.Minute},
 		RetainLogs:         50,
-		Jitter:             Duration{15 * time.Minute},
+		Jitter:             Duration{5 * time.Minute},
 		EphemeralRetention: Duration{7 * 24 * time.Hour},
 	}
 }

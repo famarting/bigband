@@ -64,7 +64,10 @@ func (r *Router) HandleEvent(env bigbandext.Envelope) {
 		// the run hasn't completed yet (we still wait for completion before
 		// posting, but the session id is now safely persisted).
 		var data bigbandext.ClaudeSessionStartedData
-		_ = json.Unmarshal(env.Data, &data)
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			log.Printf("bigband-slack: unmarshal %s event: %v", env.Type, err)
+			return
+		}
 		if data.SessionID == "" {
 			return
 		}
@@ -75,7 +78,10 @@ func (r *Router) HandleEvent(env bigbandext.Envelope) {
 
 	case bigbandext.TypeTaskRunWorktreeReady:
 		var data bigbandext.TaskRunWorktreeReadyData
-		_ = json.Unmarshal(env.Data, &data)
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			log.Printf("bigband-slack: unmarshal %s event: %v", env.Type, err)
+			return
+		}
 		_ = r.store.LinkTaskMeta(env.TaskName, "", data.WorktreePath)
 
 	case bigbandext.TypeTaskRunCompleted:
@@ -119,7 +125,7 @@ func (r *Router) handleCompleted(env bigbandext.Envelope) {
 		threadTS string
 	)
 	if slackOriginated {
-		rule = &MirrorRule{OnFailure: true, IncludeStatus: true, OpenThread: true}
+		rule = &MirrorRule{OnFailure: true, IncludeStatus: true, AllowReplies: true}
 		channel = runMapping.Channel
 		threadTS = runMapping.ThreadTS
 	} else {
@@ -161,7 +167,7 @@ func (r *Router) handleCompleted(env bigbandext.Envelope) {
 		posted = threadTS
 	}
 	log.Printf("bigband-slack: posted task=%s channel=%s thread=%s", parentName, channel, posted)
-	if err := r.store.LinkRun(env.RunID, parentName, channel, posted, data.SessionID); err != nil {
+	if err := r.store.LinkRun(env.RunID, parentName, channel, posted, data.SessionID, rule.AllowReplies); err != nil {
 		log.Printf("bigband-slack: persist mapping: %v", err)
 	}
 }
@@ -191,19 +197,23 @@ func (r *Router) HandleSlackMessage(msg SlackMessage) bool {
 	}
 	log.Printf("bigband-slack: inbound message channel=%s user=%s ts=%s thread=%q mention=%v len=%d", channelLabel, msg.User, msg.TS, msg.ThreadTS, msg.Mentioned, len(msg.Text))
 	cfg := r.snapshotCfg()
-	// Thread reply: route to follow-up if enabled and we have a session.
+	// Thread reply: route to follow-up if enabled and the mirror rule permits replies.
 	if msg.ThreadTS != "" && msg.ThreadTS != msg.TS {
 		if !cfg.Threads.Enabled {
 			log.Printf("bigband-slack: thread reply ignored — threads.enabled=false")
 			return false
 		}
-		taskName, mapping, ok := r.store.LookupThread(msg.ThreadTS)
+		taskName, snap, ok := r.store.LookupThread(msg.ThreadTS)
 		if !ok {
 			log.Printf("bigband-slack: thread reply ignored — no mapping for thread=%s (was the parent run posted by this integration?)", msg.ThreadTS)
 			return false
 		}
-		log.Printf("bigband-slack: routing thread reply to followup parent=%s session=%s", taskName, mapping.SessionID)
-		return r.submitFollowup(taskName, mapping, msg)
+		if !snap.AllowReplies {
+			log.Printf("bigband-slack: thread reply ignored — allow_replies=false for task=%s", taskName)
+			return false
+		}
+		log.Printf("bigband-slack: routing thread reply to followup parent=%s session=%s", taskName, snap.SessionID)
+		return r.submitFollowup(taskName, snap, msg)
 	}
 
 	// Top-level message in a configured trigger channel.
@@ -254,11 +264,16 @@ func (r *Router) runChannelCommand(ch *TriggerChannel, cmd *TriggerCommand, re *
 		if folder == "" {
 			folder = ch.Folder
 		}
+		name := groups["name"]
 		prompt := groups["prompt"]
 		if prompt == "" {
 			prompt = strings.TrimSpace(strings.Join(match[1:], " "))
 		}
-		r.submitOneOffRaw(folder, prompt, groups["name"], msg)
+		if name == "" || prompt == "" {
+			r.ack(msg, "❌ command requires both a name and a prompt")
+			return
+		}
+		r.submitOneOffRaw(folder, prompt, name, msg)
 	}
 }
 
@@ -291,19 +306,21 @@ func (r *Router) submitOneOffRaw(folder, prompt, name string, msg SlackMessage) 
 	log.Printf("bigband-slack: submitted task=%s run=%s", out.TaskName, out.RunID)
 	r.ack(msg, fmt.Sprintf("✅ submitted `%s` (run `%s`)", out.TaskName, out.RunID))
 	threadTS := msg.TS
-	_ = r.store.LinkRun(out.RunID, out.TaskName, msg.Channel, threadTS, "")
+	if err := r.store.LinkRun(out.RunID, out.TaskName, msg.Channel, threadTS, "", true); err != nil {
+		log.Printf("bigband-slack: WARN failed to persist thread mapping run=%s ts=%s channel=%s: %v — thread replies will not route", out.RunID, threadTS, msg.Channel, err)
+	}
 	_ = r.store.LinkTaskMeta(out.TaskName, folder, "")
 	return out.RunID
 }
 
-func (r *Router) submitFollowup(taskName string, mapping TaskMapping, msg SlackMessage) bool {
-	if mapping.SessionID == "" {
+func (r *Router) submitFollowup(taskName string, snap ThreadSnapshot, msg SlackMessage) bool {
+	if snap.SessionID == "" {
 		r.ack(msg, "❌ no session id known for this thread — cannot follow up")
 		return false
 	}
-	folder := mapping.Worktree
+	folder := snap.Worktree
 	if folder == "" {
-		folder = mapping.Folder
+		folder = snap.Folder
 	}
 	if folder == "" {
 		r.ack(msg, "❌ no folder known for this thread — cannot follow up")
@@ -312,15 +329,15 @@ func (r *Router) submitFollowup(taskName string, mapping TaskMapping, msg SlackM
 	req := bigbandext.SubmitRunRequest{
 		Folder:          folder,
 		Prompt:          msg.Text,
-		ParentSessionID: mapping.SessionID,
+		ParentSessionID: snap.SessionID,
 		Ephemeral:       true,
 		TriggeredBy:     fmt.Sprintf("slack:thread:%s", msg.ThreadTS),
 	}
-	if mapping.Worktree != "" {
+	if snap.Worktree != "" {
 		f := false
 		req.Worktree = &f
 	}
-	log.Printf("bigband-slack: inbound followup parent=%s session=%s thread=%s prompt_len=%d", taskName, mapping.SessionID, msg.ThreadTS, len(msg.Text))
+	log.Printf("bigband-slack: inbound followup parent=%s session=%s thread=%s prompt_len=%d", taskName, snap.SessionID, msg.ThreadTS, len(msg.Text))
 	out, err := r.bb.Submit(req)
 	if err != nil {
 		log.Printf("bigband-slack: followup failed: %v", err)
@@ -328,7 +345,7 @@ func (r *Router) submitFollowup(taskName string, mapping TaskMapping, msg SlackM
 		return false
 	}
 	log.Printf("bigband-slack: followup submitted task=%s run=%s parent=%s", out.TaskName, out.RunID, taskName)
-	_ = r.store.LinkRun(out.RunID, taskName, msg.Channel, mapping.ThreadTS, mapping.SessionID)
+	_ = r.store.LinkRun(out.RunID, taskName, msg.Channel, msg.ThreadTS, snap.SessionID, snap.AllowReplies)
 	return true
 }
 

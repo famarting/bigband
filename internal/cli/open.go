@@ -28,15 +28,20 @@ func openTask(name string) error {
 	if err != nil {
 		return err
 	}
-	t := cfg.TaskByName(name)
-	if t == nil {
-		return fmt.Errorf("task %q not found", name)
-	}
-
-	dir := t.Folder
 	st, _ := state.Load()
-	if ts := st.Get(name); ts.WorktreePath != "" {
+	ts := st.Get(name)
+
+	dir := ""
+	if t := cfg.TaskByName(name); t != nil {
+		dir = t.Folder
+	}
+	if ts.WorktreePath != "" {
 		dir = ts.WorktreePath
+	} else if dir == "" {
+		dir = ts.Folder
+	}
+	if dir == "" {
+		return fmt.Errorf("task %q not found", name)
 	}
 
 	editor := os.Getenv("VISUAL")

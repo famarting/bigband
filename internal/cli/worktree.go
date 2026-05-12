@@ -40,16 +40,17 @@ func newWorktreeMoveCmd() *cobra.Command {
 				return fmt.Errorf("no tracked worktree for task %q", taskName)
 			}
 
-			cfg, err := config.Load(paths.Config())
-			if err != nil {
-				return err
+			folder := ts.Folder
+			if cfg, err := config.Load(paths.Config()); err == nil {
+				if t := cfg.TaskByName(taskName); t != nil {
+					folder = t.Folder
+				}
 			}
-			t := cfg.TaskByName(taskName)
-			if t == nil {
-				return fmt.Errorf("task %q not found", taskName)
+			if folder == "" {
+				return fmt.Errorf("task %q: no folder recorded — cannot resolve repo root", taskName)
 			}
 
-			repoRoot, err := worktree.RepoRoot(t.Folder)
+			repoRoot, err := worktree.RepoRoot(folder)
 			if err != nil {
 				return err
 			}
@@ -86,16 +87,17 @@ func newWorktreeRmCmd() *cobra.Command {
 				return fmt.Errorf("no tracked worktree for task %q", taskName)
 			}
 
-			cfg, err := config.Load(paths.Config())
-			if err != nil {
-				return err
+			folder := ts.Folder
+			if cfg, err := config.Load(paths.Config()); err == nil {
+				if t := cfg.TaskByName(taskName); t != nil {
+					folder = t.Folder
+				}
 			}
-			t := cfg.TaskByName(taskName)
-			if t == nil {
-				return fmt.Errorf("task %q not found", taskName)
+			if folder == "" {
+				return fmt.Errorf("task %q: no folder recorded — cannot resolve repo root", taskName)
 			}
 
-			repoRoot, err := worktree.RepoRoot(t.Folder)
+			repoRoot, err := worktree.RepoRoot(folder)
 			if err != nil {
 				return err
 			}

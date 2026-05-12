@@ -31,12 +31,13 @@ const SchemaVersion = bigbandext.SchemaVersion
 
 // Type aliases for the canonical pkg/bigbandext types.
 type (
-	Envelope     = bigbandext.Envelope
-	Type         = bigbandext.Type
-	Source       = bigbandext.Source
-	Filter       = bigbandext.Filter
-	Publisher    = bigbandext.Publisher
-	NopPublisher = bigbandext.NopPublisher
+	Envelope           = bigbandext.Envelope
+	Type               = bigbandext.Type
+	Source             = bigbandext.Source
+	Filter             = bigbandext.Filter
+	Publisher          = bigbandext.Publisher
+	NopPublisher       = bigbandext.NopPublisher
+	ConfigReloadedData = bigbandext.ConfigReloadedData
 )
 
 // Re-export the closed Type constants.
@@ -52,6 +53,7 @@ const (
 	TypeExtensionStarted     = bigbandext.TypeExtensionStarted
 	TypeExtensionExited      = bigbandext.TypeExtensionExited
 	TypeExtensionFailed      = bigbandext.TypeExtensionFailed
+	TypeConfigReloaded       = bigbandext.TypeConfigReloaded
 )
 
 // Re-export the Source constants.

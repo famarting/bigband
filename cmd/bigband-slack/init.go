@@ -32,6 +32,11 @@ slack:
 # Outbound: which task runs are mirrored to Slack, and how. First match wins.
 # Each rule needs at least one of "task" (exact name or simple glob) or "tasks"
 # (list). Omit or set enabled:false to opt out.
+#
+# Wildcard note: only "*" is supported as a wildcard character. It may appear
+# as a prefix ("*-report"), suffix ("daily-*"), or standalone ("*") to match
+# everything. Full glob patterns like "**", "?", or character classes "[...]"
+# are NOT supported and will be treated as literal characters.
 mirror: []
 # Example rule (uncomment + edit):
 # mirror:
@@ -90,7 +95,7 @@ command:
   - daemon
 
 env:
-  PATH: /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+  PATH: ${env:PATH}
   SLACK_APP_TOKEN: ${env:SLACK_APP_TOKEN}
   SLACK_BOT_TOKEN: ${env:SLACK_BOT_TOKEN}
 

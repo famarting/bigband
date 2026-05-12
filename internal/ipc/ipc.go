@@ -5,12 +5,18 @@ package ipc
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"time"
 
 	"github.com/famarting/bigband/internal/paths"
 )
+
+// maxConcurrentConns caps the number of IPC connections handled at once. A
+// local CLI should never need more than a handful; this bound prevents a
+// runaway caller from pinning unlimited goroutines.
+const maxConcurrentConns = 32
 
 const dialTimeout = 2 * time.Second
 
@@ -60,7 +66,7 @@ type SubmitRunRequest struct {
 type SubmitRunReply struct {
 	RunID    string `json:"run_id"`
 	TaskName string `json:"task_name"`
-	LogPath  string `json:"log_path"` // only populated once the run starts opening logs; may be empty in the immediate reply
+	LogPath  string `json:"log_path"` // path of the log file the runner will open for this run; deterministic from task name + run timestamp
 }
 
 // SubscriberInfo is one row of a "subscribers" reply. Mirrors
@@ -149,6 +155,13 @@ type TaskStatus struct {
 	// Ephemeral is true when the task exists only in state.json — i.e. it was
 	// fired via IPC submit and was never written to config.yaml.
 	Ephemeral bool `json:"ephemeral,omitempty"`
+	// SessionID is the Claude session id recorded by the most recent run.
+	// Empty when the task has never run or didn't produce one.
+	SessionID string `json:"session_id,omitempty"`
+	// Prompt is the configured prompt body (populated for configured tasks
+	// only — ephemerals don't persist their prompt). Used by extensions that
+	// promote a configured task into a multi-step workflow.
+	Prompt string `json:"prompt,omitempty"`
 }
 
 // Send opens a connection to the daemon and sends cmd, returning the reply.
@@ -187,6 +200,7 @@ func Serve(handler func(net.Conn)) (stop func(), err error) {
 		ln.Close()
 		return nil, fmt.Errorf("chmod socket: %w", err)
 	}
+	sem := make(chan struct{}, maxConcurrentConns)
 	done := make(chan struct{})
 	go func() {
 		defer ln.Close()
@@ -200,7 +214,16 @@ func Serve(handler func(net.Conn)) (stop func(), err error) {
 				}
 				continue
 			}
-			go handler(conn)
+			select {
+			case sem <- struct{}{}:
+				go func() {
+					defer func() { <-sem }()
+					handler(conn)
+				}()
+			default:
+				log.Printf("ipc: max concurrent connections (%d) reached; dropping connection", maxConcurrentConns)
+				conn.Close()
+			}
 		}
 	}()
 	return func() { close(done); ln.Close() }, nil

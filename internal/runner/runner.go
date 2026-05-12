@@ -96,13 +96,14 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 
 	// Declare all variables before any goto so the compiler is happy.
 	var (
-		status    = state.StatusOK
-		repoRoot  string
-		wtPath    string
-		runDir    = task.Folder // updated after worktree creation; fallback is original folder
-		sessionID string
-		finalMsg  string // last non-empty assistant text from the final turn
-		replyPath string // sidecar file holding finalMsg, written before post_exec
+		status      = state.StatusOK
+		repoRoot    string
+		wtPath      string
+		runDir      = task.Folder // updated after worktree creation; fallback is original folder
+		sessionID   string
+		finalMsg    string // last non-empty assistant text from the final turn
+		replyPath   string // sidecar file holding finalMsg, written before post_exec
+		taskTimeout = cfg.EffectiveTimeout(task)
 	)
 
 	// Pre-exec runs in the original folder so that commands like "git pull"
@@ -111,7 +112,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		logger.Println("--- pre_exec ---")
 	}
 	for _, cmd := range task.PreExec {
-		if err := runShell(ctx, cfg, cmd, task.Folder, w, 30*time.Minute); err != nil {
+		if err := runShell(ctx, cfg, cmd, task.Folder, w, taskTimeout); err != nil {
 			logger.Printf("pre_exec failed: %v", err)
 			status = state.StatusPreFailed
 			pub.Publish(events.Envelope{
@@ -282,7 +283,7 @@ postExec:
 		"BIGBAND_SESSION_ID=" + sessionID,
 	}
 	for _, cmd := range task.PostExec {
-		if err := runShellWithEnv(ctx, cfg, cmd, runDir, w, 10*time.Minute, env); err != nil {
+		if err := runShellWithEnv(ctx, cfg, cmd, runDir, w, taskTimeout, env); err != nil {
 			logger.Printf("post_exec error: %v", err)
 		}
 	}
@@ -358,7 +359,7 @@ func resolveRunDir(task *config.Task, w io.Writer, logger *log.Logger, st *state
 				wtPath = wt
 				runDir = dir
 				logger.Printf("reusing existing worktree %s", wtPath)
-				if err := st.SetWorktreePath(task.Name, wtPath); err != nil {
+				if err := st.SetWorktreeKept(task.Name, wtPath, task.ShouldKeepWorktree()); err != nil {
 					logger.Printf("WARNING: state update failed: %v", err)
 				}
 				return
@@ -383,7 +384,7 @@ func resolveRunDir(task *config.Task, w io.Writer, logger *log.Logger, st *state
 	wtPath = wt
 	runDir = dir
 	logger.Printf("created worktree %s", wtPath)
-	if err := st.SetWorktreePath(task.Name, wtPath); err != nil {
+	if err := st.SetWorktreeKept(task.Name, wtPath, task.ShouldKeepWorktree()); err != nil {
 		logger.Printf("WARNING: state update failed: %v", err)
 	}
 	return
@@ -402,10 +403,13 @@ func openLog(taskName, ts string) (string, *os.File, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	// Update latest symlink.
+	// Update latest symlink atomically: create a tmp symlink then rename
+	// over the old one so readers never see a missing target.
 	latest := paths.TaskLogLatest(taskName)
-	_ = os.Remove(latest)
-	_ = os.Symlink(logPath, latest)
+	tmp := latest + ".tmp"
+	if err := os.Symlink(logPath, tmp); err == nil {
+		_ = os.Rename(tmp, latest)
+	}
 	return logPath, f, nil
 }
 

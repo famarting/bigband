@@ -39,6 +39,11 @@ type TaskState struct {
 	// at runner start, before any worktree creation). Recorded so ephemeral
 	// submissions — which never appear in config.yaml — remain followable.
 	Folder string `json:"folder,omitempty"`
+	// KeepWorktree mirrors the task's keep_worktree setting at run time.
+	// Persisted so the retention prune can skip worktree-owning ephemerals that
+	// an extension (e.g. bigband-workflows) still relies on. Configured tasks
+	// are never pruned regardless, so this only affects submitted ephemerals.
+	KeepWorktree bool `json:"keep_worktree,omitempty"`
 }
 
 // State is the full state file.
@@ -123,6 +128,18 @@ func (s *State) SetWorktreePath(name, path string) error {
 	return s.save()
 }
 
+// SetWorktreeKept records the worktree path AND the keep_worktree flag in a
+// single transaction. Used by the runner to mark a worktree as retained so the
+// retention pruner won't delete it underneath a long-lived extension instance.
+func (s *State) SetWorktreeKept(name, path string, keep bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ts := s.get(name)
+	ts.WorktreePath = path
+	ts.KeepWorktree = keep
+	return s.save()
+}
+
 // Get returns a copy of the task state.
 func (s *State) Get(name string) TaskState {
 	s.mu.Lock()
@@ -144,17 +161,26 @@ func (s *State) RemoveTask(name string) error {
 	return s.save()
 }
 
+// RemovedEphemeral describes one ephemeral entry dropped by
+// RemoveStaleEphemerals. Folder + WorktreePath are returned so the caller can
+// clean up the on-disk worktree (which lives outside the state file).
+type RemovedEphemeral struct {
+	Name         string
+	Folder       string
+	WorktreePath string
+}
+
 // RemoveStaleEphemerals drops state entries for tasks not in the configured
 // set whose LastRun is before cutoff and which are not currently running.
-// Returns the names removed (caller is expected to clean up logs/worktrees).
+// Returns the removed entries (caller is expected to clean up logs/worktrees).
 //
 // Ephemeral here means "submitted via IPC, never written to config.yaml" —
 // configured tasks (whose names are in `configured`) are never touched, even
 // when their last run is ancient.
-func (s *State) RemoveStaleEphemerals(configured map[string]bool, cutoff time.Time) []string {
+func (s *State) RemoveStaleEphemerals(configured map[string]bool, cutoff time.Time) []RemovedEphemeral {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var removed []string
+	var removed []RemovedEphemeral
 	for name, ts := range s.Tasks {
 		if configured[name] || ts == nil {
 			continue
@@ -162,9 +188,19 @@ func (s *State) RemoveStaleEphemerals(configured map[string]bool, cutoff time.Ti
 		if ts.RunningPID != 0 {
 			continue
 		}
+		// Worktrees retained at the owner's request (extensions like
+		// bigband-workflows) must outlive their last run. Their owners are
+		// responsible for explicit cleanup via `bigband rm` / Forget.
+		if ts.KeepWorktree && ts.WorktreePath != "" {
+			continue
+		}
 		if ts.LastRun == nil || ts.LastRun.Before(cutoff) {
+			removed = append(removed, RemovedEphemeral{
+				Name:         name,
+				Folder:       ts.Folder,
+				WorktreePath: ts.WorktreePath,
+			})
 			delete(s.Tasks, name)
-			removed = append(removed, name)
 		}
 	}
 	if len(removed) > 0 {
