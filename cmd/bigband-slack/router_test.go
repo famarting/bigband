@@ -15,7 +15,8 @@ import (
 // --- mock Slack client ---
 
 type mockSlack struct {
-	posted []slackPost
+	posted    []slackPost
+	reactions []slackReaction
 }
 
 type slackPost struct {
@@ -24,9 +25,20 @@ type slackPost struct {
 	threadTS string
 }
 
+type slackReaction struct {
+	channel   string
+	emoji     string
+	timestamp string
+}
+
 func (m *mockSlack) PostMessage(channel, text, threadTS string) (string, error) {
 	m.posted = append(m.posted, slackPost{channel, text, threadTS})
 	return "ts-new", nil
+}
+
+func (m *mockSlack) AddReaction(channel, emoji, timestamp string) error {
+	m.reactions = append(m.reactions, slackReaction{channel, emoji, timestamp})
+	return nil
 }
 
 // --- test helpers ---
@@ -185,6 +197,29 @@ func TestHandleSlackMessage_ThreadFound(t *testing.T) {
 	}
 	if handled := r.HandleSlackMessage(msg); !handled {
 		t.Error("expected message to be handled")
+	}
+}
+
+// TestHandleSlackMessage_ThreadFound_LinkRunBeforeMeta exercises the submitOneOffRaw
+// order: LinkRun is called first (sessionID="", folder not yet known), then
+// LinkTaskMeta fills in the folder. The thread snapshot must get the folder so
+// a follow-up reply doesn't hit "no folder known for this thread".
+func TestHandleSlackMessage_ThreadFound_LinkRunBeforeMeta(t *testing.T) {
+	r, _ := newSlackRouter(t)
+	r.cfg = &Config{Threads: ThreadConfig{Enabled: true}}
+	r.bb = startSlackFakeDaemon(t)
+
+	folder := t.TempDir()
+	// submitOneOffRaw order: LinkRun first (no folder/session yet), then LinkTaskMeta.
+	_ = r.store.LinkRun("run-xyz", "my-task", "C-chan", "thread-ts", "", true)
+	_ = r.store.LinkTaskMeta("my-task", folder, "")
+	_ = r.store.SetTaskSessionID("my-task", "session-xyz")
+
+	msg := SlackMessage{
+		Channel: "C-chan", User: "U1", Text: "follow up", TS: "ts-new", ThreadTS: "thread-ts",
+	}
+	if handled := r.HandleSlackMessage(msg); !handled {
+		t.Error("expected message to be handled — folder should propagate even when LinkRun precedes LinkTaskMeta")
 	}
 }
 

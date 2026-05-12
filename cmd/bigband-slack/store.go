@@ -168,10 +168,14 @@ func (s *Store) SetTaskSessionID(taskName, sessionID string) error {
 }
 
 // LinkTaskMeta records the task's folder/worktree alongside the thread, so
-// follow-ups know where to run.
+// follow-ups know where to run. It also propagates the values to the current
+// thread snapshot (identified by the task's ThreadTS), mirroring what
+// SetTaskSessionID does for session ids — this ensures the original trigger
+// thread can follow up even before the completion event fires.
 func (s *Store) LinkTaskMeta(taskName, folder, worktree string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := time.Now().Unix()
 	prev := s.Tasks[taskName]
 	if folder != "" {
 		prev.Folder = folder
@@ -179,8 +183,21 @@ func (s *Store) LinkTaskMeta(taskName, folder, worktree string) error {
 	if worktree != "" {
 		prev.Worktree = worktree
 	}
-	prev.LastSeenUnix = time.Now().Unix()
+	prev.LastSeenUnix = now
 	s.Tasks[taskName] = prev
+
+	if prev.ThreadTS != "" && (folder != "" || worktree != "") {
+		snap := s.Threads[prev.ThreadTS]
+		if folder != "" {
+			snap.Folder = folder
+		}
+		if worktree != "" {
+			snap.Worktree = worktree
+		}
+		snap.LastSeenUnix = now
+		s.Threads[prev.ThreadTS] = snap
+	}
+
 	return s.save()
 }
 

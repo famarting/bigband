@@ -16,6 +16,7 @@ import (
 // slack.go via the slack-go/slack library; tests can stub it.
 type Slack interface {
 	PostMessage(channel, text, threadTS string) (newThreadTS string, err error)
+	AddReaction(channel, emoji, timestamp string) error
 }
 
 // Router glues bigband events to Slack and Slack messages to bigband IPC.
@@ -182,7 +183,7 @@ func formatCompletion(_ bigbandext.Envelope, data bigbandext.TaskRunCompletedDat
 	if rule.IncludeStatus {
 		dur := time.Duration(data.DurationMS) * time.Millisecond
 		statusLine := fmt.Sprintf("`%s` in %s", data.Status, dur.Round(time.Second))
-		return statusLine + "\n" + body
+		return body + "\n" + statusLine
 	}
 	return body
 }
@@ -257,7 +258,7 @@ func (r *Router) runChannelCommand(ch *TriggerChannel, cmd *TriggerCommand, re *
 				r.ack(msg, fmt.Sprintf("❌ run %s failed: %v", name, err))
 				return
 			}
-			r.ack(msg, fmt.Sprintf("▶️ running `%s`", name))
+			r.react(msg, "eyes")
 		}
 	case "submit":
 		folder := cmd.Folder
@@ -304,7 +305,7 @@ func (r *Router) submitOneOffRaw(folder, prompt, name string, msg SlackMessage) 
 		return ""
 	}
 	log.Printf("bigband-slack: submitted task=%s run=%s", out.TaskName, out.RunID)
-	r.ack(msg, fmt.Sprintf("✅ submitted `%s` (run `%s`)", out.TaskName, out.RunID))
+	r.react(msg, "eyes")
 	threadTS := msg.TS
 	if err := r.store.LinkRun(out.RunID, out.TaskName, msg.Channel, threadTS, "", true); err != nil {
 		log.Printf("bigband-slack: WARN failed to persist thread mapping run=%s ts=%s channel=%s: %v — thread replies will not route", out.RunID, threadTS, msg.Channel, err)
@@ -346,6 +347,7 @@ func (r *Router) submitFollowup(taskName string, snap ThreadSnapshot, msg SlackM
 	}
 	log.Printf("bigband-slack: followup submitted task=%s run=%s parent=%s", out.TaskName, out.RunID, taskName)
 	_ = r.store.LinkRun(out.RunID, taskName, msg.Channel, msg.ThreadTS, snap.SessionID, snap.AllowReplies)
+	r.react(msg, "eyes")
 	return true
 }
 
@@ -356,6 +358,12 @@ func (r *Router) ack(msg SlackMessage, text string) {
 	}
 	if _, err := r.slack.PostMessage(msg.Channel, text, threadTS); err != nil {
 		log.Printf("bigband-slack: ack failed: %v", err)
+	}
+}
+
+func (r *Router) react(msg SlackMessage, emoji string) {
+	if err := r.slack.AddReaction(msg.Channel, emoji, msg.TS); err != nil {
+		log.Printf("bigband-slack: react failed: %v", err)
 	}
 }
 

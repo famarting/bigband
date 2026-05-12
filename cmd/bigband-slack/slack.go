@@ -83,6 +83,10 @@ func (c *slackClient) channelName(id string) string {
 	return info.Name
 }
 
+func (c *slackClient) AddReaction(channel, emoji, timestamp string) error {
+	return c.api.AddReaction(emoji, slack.ItemRef{Channel: channel, Timestamp: timestamp})
+}
+
 func (c *slackClient) PostMessage(channel, text, threadTS string) (string, error) {
 	opts := []slack.MsgOption{
 		slack.MsgOptionText(text, false),
