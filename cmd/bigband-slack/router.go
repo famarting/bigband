@@ -133,6 +133,17 @@ func (r *Router) handleCompleted(env bigbandext.Envelope) {
 		cfg := r.snapshotCfg()
 		rule = cfg.MatchTask(parentName)
 		if rule == nil {
+			// No mirror rule AND no slack-originated run mapping. Usually
+			// expected for cron tasks the user hasn't opted in. But when the
+			// run *was* triggered from Slack (env.TriggeredBy starts with
+			// "slack:") the mapping should have been there — surface that loudly
+			// because it means state.json lost the LinkRun row (most often: two
+			// bigband-slack daemons racing on the store).
+			if strings.HasPrefix(env.TriggeredBy, "slack:") {
+				log.Printf("bigband-slack: DROP completion for slack-triggered task=%s run=%s triggered_by=%s — no run mapping and no mirror rule. Likely cause: a second bigband-slack instance overwrote state.json. Check `ps -ef | grep bigband-slack`.", parentName, env.RunID, env.TriggeredBy)
+			} else {
+				log.Printf("bigband-slack: skip completion task=%s run=%s — no mirror rule and not slack-originated", parentName, env.RunID)
+			}
 			return
 		}
 		channel = rule.Channel

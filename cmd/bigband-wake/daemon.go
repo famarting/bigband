@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/famarting/bigband/internal/proc"
 	"github.com/famarting/bigband/pkg/bigbandext"
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
@@ -36,6 +37,15 @@ func newDaemonCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
 			defer cancel()
+
+			// Exit if the bigband daemon that spawned us dies — see the
+			// matching block in bigband-slack for the orphan story.
+			go func() {
+				if proc.WatchParent(ctx, 0) {
+					log.Printf("bigband-wake: parent process exited (reparented); shutting down")
+					cancel()
+				}
+			}()
 
 			cfg, err := LoadConfig()
 			if err != nil {

@@ -118,6 +118,13 @@ func StatePath() string {
 	return filepath.Join(paths.Root(), "extensions", "bigband-slack", "state.json")
 }
 
+// InstanceLockPath is the flock file the daemon command takes to enforce
+// single-instance semantics. Two parallel bigband-slack daemons share this
+// state.json and silently corrupt it.
+func InstanceLockPath() string {
+	return filepath.Join(paths.Root(), "extensions", "bigband-slack", "daemon.lock")
+}
+
 // DaemonLogPath returns the path bigband-slack writes its launchd-managed
 // stdout/stderr to.
 func DaemonLogPath() string {

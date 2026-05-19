@@ -16,10 +16,11 @@ func Root() string {
 	return filepath.Join(home, ".bigband-tasks")
 }
 
-func Config() string    { return filepath.Join(Root(), "config.yaml") }
-func Socket() string    { return filepath.Join(Root(), "daemon.sock") }
-func PidFile() string   { return filepath.Join(Root(), "daemon.pid") }
-func DaemonLog() string { return filepath.Join(Root(), "daemon.log") }
+func Config() string       { return filepath.Join(Root(), "config.yaml") }
+func Socket() string       { return filepath.Join(Root(), "daemon.sock") }
+func PidFile() string      { return filepath.Join(Root(), "daemon.pid") }
+func InstanceLock() string { return filepath.Join(Root(), "daemon.lock") }
+func DaemonLog() string    { return filepath.Join(Root(), "daemon.log") }
 func StateFile() string { return filepath.Join(Root(), "state.json") }
 func StateDir() string  { return filepath.Join(Root(), "state") }
 func LogsDir() string   { return filepath.Join(Root(), "logs") }

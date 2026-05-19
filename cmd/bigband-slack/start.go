@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/famarting/bigband/internal/proc"
 	"github.com/famarting/bigband/pkg/bigbandext"
 	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
@@ -20,6 +22,32 @@ func newDaemonCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
 			defer cancel()
+
+			// Refuse to start if another bigband-slack daemon already owns the
+			// state.json for this user. Two concurrent instances race on the
+			// store and silently lose run-to-thread mappings (which causes
+			// completions to drop their Slack reply).
+			releaseLock, holder, err := proc.AcquireInstanceLock(InstanceLockPath())
+			if err != nil {
+				if holder > 0 {
+					return fmt.Errorf("bigband-slack daemon is already running as pid=%d (lock %s) — stop it first", holder, InstanceLockPath())
+				}
+				return fmt.Errorf("acquire instance lock: %w", err)
+			}
+			defer releaseLock()
+			log.Printf("bigband-slack: acquired instance lock %s pid=%d", InstanceLockPath(), syscall.Getpid())
+
+			// Self-terminate if the bigband daemon that spawned us exits.
+			// Without this, a bigband daemon crash leaves bigband-slack
+			// reparented to launchd; the next bigband daemon spawns a fresh
+			// instance (blocked on the lock above) and the orphan keeps
+			// running until somebody notices.
+			go func() {
+				if proc.WatchParent(ctx, 0) {
+					log.Printf("bigband-slack: parent process exited (reparented); shutting down")
+					cancel()
+				}
+			}()
 
 			cfg, err := LoadConfig()
 			if err != nil {

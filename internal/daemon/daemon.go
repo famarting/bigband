@@ -50,6 +50,20 @@ func Run() error {
 		return fmt.Errorf("creating directories: %w", err)
 	}
 
+	// Single-instance guard. Two daemons sharing ~/.bigband-tasks (e.g. a
+	// leftover from a renamed launchd plist) silently corrupt state.json and
+	// race on daemon.sock — see the bigband-slack/state.json race that drops
+	// Slack replies. Refuse to start a duplicate and tell the operator which
+	// PID is holding the lock.
+	releaseLock, holder, err := proc.AcquireInstanceLock(paths.InstanceLock())
+	if err != nil {
+		if holder > 0 {
+			return fmt.Errorf("bigband daemon is already running as pid=%d (lock %s) — stop it before starting another", holder, paths.InstanceLock())
+		}
+		return fmt.Errorf("acquire instance lock: %w", err)
+	}
+	defer releaseLock()
+
 	if err := writePID(); err != nil {
 		return err
 	}
