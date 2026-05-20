@@ -57,6 +57,7 @@ type SubmitRunRequest struct {
 	Timeout         string   `json:"timeout,omitempty"`
 	Model           string   `json:"model,omitempty"`
 	Effort          string   `json:"effort,omitempty"`
+	Agent           string   `json:"agent,omitempty"`
 	ParentSessionID string   `json:"parent_session_id,omitempty"`
 	Ephemeral       bool     `json:"ephemeral,omitempty"`
 	TriggeredBy     string   `json:"triggered_by,omitempty"`

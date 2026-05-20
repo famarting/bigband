@@ -1,4 +1,4 @@
-package runner
+package claude
 
 import (
 	"encoding/json"
@@ -57,7 +57,7 @@ type streamWriter struct {
 	// Top-level result fields.
 	result    string
 	sessionID string
-	wakeup    *WakeupRequest
+	wakeup    *wakeupRequest
 
 	// Final-message capture: lastTextBlock holds the most recently completed
 	// text content block. On each result event it is promoted into
@@ -67,8 +67,10 @@ type streamWriter struct {
 	finalMessage  string
 }
 
-// WakeupRequest holds the parameters Claude passed to ScheduleWakeup.
-type WakeupRequest struct {
+// wakeupRequest holds the parameters Claude passed to ScheduleWakeup, as
+// they appear on the wire (delaySeconds in seconds). The agent provider
+// converts this into the agent-level WakeupRequest (with time.Duration).
+type wakeupRequest struct {
 	DelaySeconds int    `json:"delaySeconds"`
 	Prompt       string `json:"prompt"`
 }
@@ -110,7 +112,7 @@ func (sw *streamWriter) getResult() (string, string) {
 	return sw.result, sw.sessionID
 }
 
-func (sw *streamWriter) getWakeup() *WakeupRequest {
+func (sw *streamWriter) getWakeup() *wakeupRequest {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 	return sw.wakeup
@@ -380,7 +382,7 @@ func (sw *streamWriter) captureWakeup(input json.RawMessage) {
 	if len(input) == 0 {
 		return
 	}
-	var req WakeupRequest
+	var req wakeupRequest
 	if err := json.Unmarshal(input, &req); err == nil && req.DelaySeconds > 0 {
 		sw.wakeup = &req
 	}

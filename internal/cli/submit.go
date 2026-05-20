@@ -25,6 +25,7 @@ func NewSubmitCmd() *cobra.Command {
 		timeout         string
 		model           string
 		effort          string
+		agentName       string
 		triggeredBy     string
 		preExec         []string
 		postExec        []string
@@ -50,6 +51,7 @@ func NewSubmitCmd() *cobra.Command {
 				Timeout:         timeout,
 				Model:           model,
 				Effort:          effort,
+				Agent:           agentName,
 			}
 			if noWorktree {
 				f := false
@@ -78,6 +80,7 @@ func NewSubmitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&timeout, "timeout", "", "task timeout (e.g. 30m)")
 	cmd.Flags().StringVar(&model, "model", "", "Claude model override")
 	cmd.Flags().StringVar(&effort, "effort", "", "Claude effort override")
+	cmd.Flags().StringVar(&agentName, "agent", "", "agent provider override (e.g. claude, claude-pty)")
 	cmd.Flags().StringVar(&triggeredBy, "triggered-by", "", "free-form label for traceability")
 	cmd.Flags().StringSliceVar(&preExec, "pre-exec", nil, "shell command to run before claude (repeatable)")
 	cmd.Flags().StringSliceVar(&postExec, "post-exec", nil, "shell command to run after claude (repeatable)")
@@ -92,6 +95,7 @@ func NewFollowupCmd() *cobra.Command {
 	var (
 		ephemeral   bool
 		triggeredBy string
+		agentName   string
 	)
 	cmd := &cobra.Command{
 		Use:               "followup <task> <prompt>",
@@ -108,10 +112,19 @@ func NewFollowupCmd() *cobra.Command {
 			st, _ := state.Load()
 			ts := st.Get(name)
 			var configuredFolder string
+			var configuredAgent string
 			if cfg != nil {
 				if t := cfg.TaskByName(name); t != nil {
 					configuredFolder = t.Folder
+					configuredAgent = cfg.EffectiveAgent(t)
 				}
+			}
+			// Sessions are owned by the CLI that produced them. Inherit the
+			// original task's resolved agent unless the user explicitly overrode
+			// it with --agent.
+			effectiveAgent := agentName
+			if effectiveAgent == "" {
+				effectiveAgent = configuredAgent
 			}
 			if configuredFolder == "" && ts.LastRun == nil {
 				return fmt.Errorf("task %q not found in config or state", name)
@@ -153,6 +166,7 @@ func NewFollowupCmd() *cobra.Command {
 				Worktree:        &noWorktree,
 				Ephemeral:       ephemeral,
 				TriggeredBy:     triggeredBy,
+				Agent:           effectiveAgent,
 			}
 			reply, err := ipc.Send(ipc.Cmd{Action: "submit", Submit: req})
 			if err != nil {
@@ -171,5 +185,6 @@ func NewFollowupCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&ephemeral, "ephemeral", true, "do not persist the follow-up as a new task")
 	cmd.Flags().StringVar(&triggeredBy, "triggered-by", "cli:followup", "free-form label for traceability")
+	cmd.Flags().StringVar(&agentName, "agent", "", "agent provider override (defaults to the original task's agent)")
 	return cmd
 }

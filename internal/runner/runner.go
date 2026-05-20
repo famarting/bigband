@@ -1,4 +1,10 @@
-// Package runner executes a single bigband task: pre-exec → claude → post-exec.
+// Package runner executes a single bigband task: pre-exec → agent → post-exec.
+//
+// The "agent" step is delegated to an agent.Agent implementation (Claude Code
+// by default; other providers register themselves via blank imports in main).
+// This package only deals with the generic lifecycle — worktrees, pre/post
+// shells, the optional wakeup retry loop, lifecycle events — never with
+// provider-specific protocols.
 package runner
 
 import (
@@ -16,9 +22,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/famarting/bigband/internal/agent"
 	"github.com/famarting/bigband/internal/config"
 	"github.com/famarting/bigband/internal/events"
 	"github.com/famarting/bigband/internal/paths"
+	"github.com/famarting/bigband/internal/proc"
 	"github.com/famarting/bigband/internal/state"
 	"github.com/famarting/bigband/internal/worktree"
 )
@@ -143,24 +151,43 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		})
 	}
 
-	// Claude — runs in a loop when Claude calls ScheduleWakeup to self-pace.
+	// Agent step — runs in a loop when the provider returns a Wakeup
+	// (e.g. Claude's ScheduleWakeup tool). Providers that don't self-reschedule
+	// return Wakeup=nil and the loop exits after one iteration.
 	{
-		logger.Println("--- claude ---")
-		flags := cfg.EffectiveClaudeFlags(task)
+		agentName := cfg.EffectiveAgent(task)
+		ag, agErr := agent.Get(agentName)
+		if agErr != nil {
+			logger.Printf("agent lookup failed: %v", agErr)
+			status = state.StatusFailed
+			goto postExec
+		}
+		logger.Printf("--- %s ---", ag.Name())
+
 		timeout := cfg.EffectiveTimeout(task)
 		deadline := time.Now().Add(timeout)
+		// One overall deadline bounds every turn (initial + wakeups), so each
+		// agent.Run inherits whatever time is left. The provider does not
+		// need to re-apply a per-call timeout.
+		agentCtx, cancel := context.WithDeadline(ctx, deadline)
+		defer cancel()
 
-		var (
-			wakeup *WakeupRequest
-			runErr error
-			msg    string
-		)
+		baseReq := agent.Request{
+			WorkDir:    runDir,
+			Model:      cfg.EffectiveModel(task),
+			Effort:     cfg.EffectiveEffort(task),
+			ExtraFlags: task.ExtraClaudeFlags,
+			LogWriter:  lf,
+			Live:       out,
+		}
+
 		// task.ResumeSessionID is set by IPC submit for follow-up runs that
-		// continue a previous Claude session. Empty for normal scheduled runs.
+		// continue a previous agent session. Empty for normal scheduled runs.
 		initialResume := task.ResumeSessionID
 		if initialResume != "" {
 			logger.Printf("resuming session %s", initialResume)
 		}
+
 		var sessionAnnounced bool
 		announceSession := func() {
 			if sessionAnnounced || sessionID == "" {
@@ -174,7 +201,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 			})
 			sessionAnnounced = true
 		}
-		emitTurn := func() {
+		emitTurn := func(msg string) {
 			pub.Publish(events.Envelope{
 				Type:     events.TypeClaudeTurnCompleted,
 				RunID:    runID,
@@ -185,28 +212,35 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 				}),
 			})
 		}
-		sessionID, wakeup, msg, runErr = runClaude(ctx, flags, task.Prompt, initialResume, runDir, lf, out, timeout)
-		if sessionID == "" && initialResume != "" {
+
+		req := baseReq
+		req.Prompt = task.Prompt
+		req.ResumeSessionID = initialResume
+		res, runErr := ag.Run(agentCtx, req)
+		if res.SessionID != "" {
+			sessionID = res.SessionID
+		} else if initialResume != "" {
 			sessionID = initialResume
 		}
 		announceSession()
-		emitTurn()
-		if msg != "" {
-			finalMsg = msg
+		emitTurn(res.FinalMessage)
+		if res.FinalMessage != "" {
+			finalMsg = res.FinalMessage
 		}
-		for wakeup != nil && runErr == nil {
+
+		for res.Wakeup != nil && runErr == nil {
 			if sessionID != "" {
 				if err2 := st.SetSessionID(task.Name, sessionID); err2 != nil {
 					logger.Printf("WARNING: state update failed: %v", err2)
 				}
 			}
-			delay := time.Duration(wakeup.DelaySeconds) * time.Second
+			delay := res.Wakeup.Delay
 			remaining := time.Until(deadline)
 			if delay >= remaining {
 				logger.Printf("scheduled wakeup in %s would exceed task timeout — stopping", delay.Round(time.Second))
 				break
 			}
-			resumePrompt := wakeup.Prompt
+			resumePrompt := res.Wakeup.Prompt
 			if resumePrompt == "" || resumePrompt == "<<autonomous-loop-dynamic>>" {
 				resumePrompt = task.Prompt
 			}
@@ -215,11 +249,11 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 				RunID:    runID,
 				TaskName: task.Name,
 				Data: events.MustData(events.ClaudeWakeupData{
-					DelaySeconds: wakeup.DelaySeconds,
+					DelaySeconds: int(delay / time.Second),
 					Prompt:       resumePrompt,
 				}),
 			})
-			logger.Printf("claude scheduled wakeup in %s — sleeping before resuming session %s", delay.Round(time.Second), sessionID)
+			logger.Printf("%s scheduled wakeup in %s — sleeping before resuming session %s", ag.Name(), delay.Round(time.Second), sessionID)
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
@@ -229,12 +263,18 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 			if runErr != nil {
 				break
 			}
-			remaining = time.Until(deadline)
-			sessionID, wakeup, msg, runErr = runClaude(ctx, flags, resumePrompt, sessionID, runDir, lf, out, remaining)
+
+			req = baseReq
+			req.Prompt = resumePrompt
+			req.ResumeSessionID = sessionID
+			res, runErr = ag.Run(agentCtx, req)
+			if res.SessionID != "" {
+				sessionID = res.SessionID
+			}
 			announceSession()
-			emitTurn()
-			if msg != "" {
-				finalMsg = msg
+			emitTurn(res.FinalMessage)
+			if res.FinalMessage != "" {
+				finalMsg = res.FinalMessage
 			}
 		}
 
@@ -244,7 +284,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 			}
 		}
 		if runErr != nil {
-			logger.Printf("claude failed: %v", runErr)
+			logger.Printf("%s failed: %v", ag.Name(), runErr)
 			switch {
 			case errors.Is(ctx.Err(), context.Canceled):
 				status = state.StatusStopped
@@ -257,10 +297,10 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 	}
 
 postExec:
-	// Persist Claude's final assistant message to a sidecar file alongside the
-	// log so post_exec scripts and downstream integrations can read it without
-	// reparsing the stream-json log. Empty when the run produced no text
-	// (e.g. ended on a tool call) — surface that, don't fabricate.
+	// Persist the agent's final assistant message to a sidecar file alongside
+	// the log so post_exec scripts and downstream integrations can read it
+	// without reparsing the raw log stream. Empty when the run produced no
+	// text (e.g. ended on a tool call) — surface that, don't fabricate.
 	if finalMsg != "" {
 		replyPath = strings.TrimSuffix(logPath, ".log") + ".reply.txt"
 		if err := os.WriteFile(replyPath, []byte(finalMsg), 0600); err != nil {
@@ -270,7 +310,8 @@ postExec:
 	}
 
 	// Post-exec runs in runDir (worktree when available) so it can inspect or
-	// commit whatever Claude produced. Falls back to task.Folder if no worktree.
+	// commit whatever the agent produced. Falls back to task.Folder if no
+	// worktree.
 	if len(task.PostExec) > 0 {
 		logger.Println("--- post_exec ---")
 	}
@@ -425,70 +466,11 @@ func runShellWithEnv(ctx context.Context, cfg *config.Config, cmd, dir string, w
 	c.Stdout = w
 	c.Stderr = w
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	killProcessGroupOnCancel(c)
+	proc.KillProcessGroupOnCancel(c)
 	if len(extra) > 0 {
 		c.Env = append(os.Environ(), extra...)
 	}
 	return c.Run()
-}
-
-func runClaude(ctx context.Context, flags []string, prompt, resumeSessionID, dir string, log, live io.Writer, timeout time.Duration) (sessionID string, wakeup *WakeupRequest, finalMessage string, err error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	var args []string
-	if resumeSessionID != "" {
-		args = append(append([]string{}, flags...), "--resume", resumeSessionID, prompt)
-	} else {
-		args = append(append([]string{}, flags...), prompt)
-	}
-	c := exec.CommandContext(ctx, "claude", args...)
-	c.Dir = dir
-	// Parse stream-json output: raw NDJSON is discarded, plain rendering goes
-	// to the log file, colorized rendering to the live writer when it's a TTY.
-	sw := newStreamWriter(io.Discard, log, live, isTerminal(live))
-	c.Stdout = sw
-	c.Stderr = io.MultiWriter(log, live)
-	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	killProcessGroupOnCancel(c)
-	err = c.Run()
-	_, sessionID = sw.getResult()
-	wakeup = sw.getWakeup()
-	finalMessage = sw.getFinalMessage()
-	return sessionID, wakeup, finalMessage, err
-}
-
-// isTerminal returns true when w is an *os.File backed by a character device
-// (i.e. a TTY rather than a pipe or regular file). Used to decide whether to
-// emit ANSI color escapes.
-func isTerminal(w io.Writer) bool {
-	f, ok := w.(*os.File)
-	if !ok {
-		return false
-	}
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
-}
-
-// killProcessGroupOnCancel arranges for context cancellation (timeout or stop)
-// to deliver SIGTERM to the entire process group, not just the direct child.
-// Without this, a shell that fork-execs subprocesses leaks them when the parent
-// shell is killed: exec.CommandContext's default Cancel only signals the
-// command's own pid. Setpgid:true (set by the caller) makes the child a pgroup
-// leader, so we can address the whole tree as -pgid.
-//
-// WaitDelay bounds how long Run waits after Cancel before forcibly killing
-// (SIGKILL) anything still hanging on. Must be called after c.SysProcAttr is set.
-func killProcessGroupOnCancel(c *exec.Cmd) {
-	c.Cancel = func() error {
-		if c.Process == nil {
-			return os.ErrProcessDone
-		}
-		return syscall.Kill(-c.Process.Pid, syscall.SIGTERM)
-	}
-	c.WaitDelay = 5 * time.Second
 }
 
 func trimLogs(taskName string, retain int) {

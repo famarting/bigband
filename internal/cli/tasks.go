@@ -175,6 +175,28 @@ func addTaskWizard(seed *config.Task) error {
 		break
 	}
 
+	// Agent provider — blank inherits defaults.agent (or DefaultAgent when that
+	// is also unset). We don't validate against the registry here to avoid
+	// pulling agent registrations into the config package; an unknown name
+	// surfaces at run time as a clear "no provider registered as X" error.
+	defaultAgent := ""
+	if seed != nil && seed.Agent != "" {
+		defaultAgent = seed.Agent
+	} else if cfg, err := config.Load(paths.Config()); err == nil && cfg.Defaults.Agent != "" {
+		defaultAgent = cfg.Defaults.Agent
+	}
+	agentPrompt := "Agent (e.g. claude, claude-pty)"
+	if defaultAgent != "" {
+		agentPrompt = fmt.Sprintf("%s [%s]", agentPrompt, defaultAgent)
+	} else {
+		agentPrompt = fmt.Sprintf("%s [inherit default: %s]", agentPrompt, config.DefaultAgent)
+	}
+	agentChoice, err := ask(agentPrompt)
+	if err != nil {
+		return err
+	}
+	agentChoice = strings.TrimSpace(agentChoice)
+
 	task := map[string]any{
 		"name":    name,
 		"folder":  folder,
@@ -192,6 +214,9 @@ func addTaskWizard(seed *config.Task) error {
 	}
 	if timeoutStr != "" {
 		task["timeout"] = timeoutStr
+	}
+	if agentChoice != "" {
+		task["agent"] = agentChoice
 	}
 	task["worktree"] = useWorktree
 	if seed != nil {
@@ -236,6 +261,14 @@ func addTaskWizard(seed *config.Task) error {
 		fmt.Printf("  timeout:  %s\n", timeoutStr)
 	} else if defaultTimeout > 0 {
 		fmt.Printf("  timeout:  %s (default)\n", defaultTimeout)
+	}
+	switch {
+	case agentChoice != "":
+		fmt.Printf("  agent:    %s\n", agentChoice)
+	case defaultAgent != "":
+		fmt.Printf("  agent:    %s (default)\n", defaultAgent)
+	default:
+		fmt.Printf("  agent:    %s (built-in default)\n", config.DefaultAgent)
 	}
 	fmt.Println()
 

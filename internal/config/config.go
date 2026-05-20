@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
@@ -65,8 +64,11 @@ type Defaults struct {
 	Jitter     Duration `yaml:"jitter"`
 	Model      string   `yaml:"model"`
 	Effort     string   `yaml:"effort"`
-	Folder     string   `yaml:"folder"`
-	PreExec    []string `yaml:"pre_exec"`
+	// Agent selects the default agent provider for tasks that don't set one
+	// explicitly. Empty falls back to DefaultAgent ("claude").
+	Agent   string   `yaml:"agent,omitempty"`
+	Folder  string   `yaml:"folder"`
+	PreExec []string `yaml:"pre_exec"`
 	// EphemeralRetention is how long IPC-submitted one-off task entries
 	// (state + log dirs) are kept after their last run. Zero or unset
 	// disables auto-pruning. Configured tasks (those in tasks:) are never
@@ -96,7 +98,10 @@ type Task struct {
 	Jitter           *Duration `yaml:"jitter"`
 	Model            string    `yaml:"model"`
 	Effort           string    `yaml:"effort"`
-	ExtraClaudeFlags []string  `yaml:"extra_claude_flags"`
+	// Agent selects the agent provider for this task. Empty falls back to
+	// Defaults.Agent and then to DefaultAgent ("claude").
+	Agent            string   `yaml:"agent,omitempty"`
+	ExtraClaudeFlags []string `yaml:"extra_claude_flags"`
 
 	// Resolved fields — populated after Validate.
 	cronExpr       string
@@ -235,9 +240,6 @@ func defaultDefaults() Defaults {
 		EphemeralRetention: Duration{7 * 24 * time.Hour},
 	}
 }
-
-// coreClaudeFlags are the flags bigband requires for its output parsing.
-var coreClaudeFlags = []string{"-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
 
 // Validate resolves and validates all tasks.
 func (c *Config) Validate() error {
@@ -428,25 +430,39 @@ func (c *Config) FindTaskOrTemplate(name string) (*Task, string) {
 	return nil, ""
 }
 
-// EffectiveClaudeFlags returns the merged flag list for a task.
-// Core flags are always included. Model and effort follow task > global > omit.
-func (c *Config) EffectiveClaudeFlags(t *Task) []string {
-	flags := slices.Clone(coreClaudeFlags)
-	model := t.Model
-	if model == "" {
-		model = c.Defaults.Model
+// DefaultAgent is the provider name used when neither the task nor the
+// top-level defaults specify one.
+const DefaultAgent = "claude"
+
+// EffectiveAgent returns the agent provider name for a task: task-level when
+// set, otherwise the top-level default, otherwise DefaultAgent.
+func (c *Config) EffectiveAgent(t *Task) string {
+	if t.Agent != "" {
+		return t.Agent
 	}
-	if model != "" {
-		flags = append(flags, "--model", model)
+	if c.Defaults.Agent != "" {
+		return c.Defaults.Agent
 	}
-	effort := t.Effort
-	if effort == "" {
-		effort = c.Defaults.Effort
+	return DefaultAgent
+}
+
+// EffectiveModel returns the model for a task, falling back to the global
+// default. Empty when neither is set — the agent provider picks its own
+// default in that case.
+func (c *Config) EffectiveModel(t *Task) string {
+	if t.Model != "" {
+		return t.Model
 	}
-	if effort != "" {
-		flags = append(flags, "--effort", effort)
+	return c.Defaults.Model
+}
+
+// EffectiveEffort returns the thinking/effort budget for a task, falling back
+// to the global default. Empty when neither is set.
+func (c *Config) EffectiveEffort(t *Task) string {
+	if t.Effort != "" {
+		return t.Effort
 	}
-	return append(flags, t.ExtraClaudeFlags...)
+	return c.Defaults.Effort
 }
 
 // EffectiveTimeout returns the task timeout, falling back to the default.

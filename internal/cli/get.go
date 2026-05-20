@@ -93,6 +93,9 @@ func getTask(name string) error {
 		} else if cfg.Defaults.Jitter.Duration > 0 {
 			row("jitter", cfg.Defaults.Jitter.String()+" (default)")
 		}
+		row("agent", agentDisplay(cfg, t))
+		row("model", inheritedDisplay(t.Model, cfg.Defaults.Model))
+		row("effort", inheritedDisplay(t.Effort, cfg.Defaults.Effort))
 		multirow("pre_exec", t.PreExec)
 		multirow("post_exec", t.PostExec)
 		if len(t.ExtraClaudeFlags) > 0 {
@@ -137,4 +140,29 @@ func dash(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// inheritedDisplay renders a string-valued task field, falling back to the
+// defaults value with a "(default)" tag, or "-" when neither is set.
+func inheritedDisplay(taskVal, defaultVal string) string {
+	if taskVal != "" {
+		return taskVal
+	}
+	if defaultVal != "" {
+		return defaultVal + " (default)"
+	}
+	return "-"
+}
+
+// agentDisplay renders the resolved agent for a task, tagging where the value
+// comes from: explicit task field, defaults.agent, or the built-in fallback.
+func agentDisplay(cfg *config.Config, t *config.Task) string {
+	switch {
+	case t.Agent != "":
+		return t.Agent
+	case cfg.Defaults.Agent != "":
+		return cfg.Defaults.Agent + " (default)"
+	default:
+		return config.DefaultAgent + " (built-in default)"
+	}
 }

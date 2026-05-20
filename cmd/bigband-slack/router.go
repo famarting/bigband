@@ -276,6 +276,18 @@ func (r *Router) runChannelCommand(ch *TriggerChannel, cmd *TriggerCommand, re *
 		if folder == "" {
 			folder = ch.Folder
 		}
+		worktree := cmd.Worktree
+		if worktree == nil {
+			worktree = ch.Worktree
+		}
+		preExec := cmd.PreExec
+		if preExec == nil {
+			preExec = ch.PreExec
+		}
+		postExec := cmd.PostExec
+		if postExec == nil {
+			postExec = ch.PostExec
+		}
 		name := groups["name"]
 		prompt := groups["prompt"]
 		if prompt == "" {
@@ -285,18 +297,20 @@ func (r *Router) runChannelCommand(ch *TriggerChannel, cmd *TriggerCommand, re *
 			r.ack(msg, "❌ command requires both a name and a prompt")
 			return
 		}
-		r.submitOneOffRaw(folder, prompt, name, msg)
+		r.submitOneOffRaw(folder, prompt, name, worktree, preExec, postExec, msg)
 	}
 }
 
 func (r *Router) submitOneOff(ch *TriggerChannel, prompt string, msg SlackMessage) bool {
-	return r.submitOneOffRaw(ch.Folder, prompt, "", msg) != ""
+	return r.submitOneOffRaw(ch.Folder, prompt, "", ch.Worktree, ch.PreExec, ch.PostExec, msg) != ""
 }
 
 // submitOneOffRaw submits a fresh ephemeral run. When the daemon replies with
 // a run_id, we acknowledge in-thread and remember the thread → run mapping so
-// the eventual completion event lands in the same thread.
-func (r *Router) submitOneOffRaw(folder, prompt, name string, msg SlackMessage) string {
+// the eventual completion event lands in the same thread. worktree, when
+// non-nil, forces the daemon's per-run worktree setting (nil = inherit default).
+// preExec / postExec are passed through verbatim; nil/empty means "no hooks".
+func (r *Router) submitOneOffRaw(folder, prompt, name string, worktree *bool, preExec, postExec []string, msg SlackMessage) string {
 	if folder == "" || prompt == "" {
 		r.ack(msg, "❌ folder and prompt required")
 		return ""
@@ -305,6 +319,9 @@ func (r *Router) submitOneOffRaw(folder, prompt, name string, msg SlackMessage) 
 		Name:        name,
 		Folder:      folder,
 		Prompt:      prompt,
+		PreExec:     preExec,
+		PostExec:    postExec,
+		Worktree:    worktree,
 		Ephemeral:   true,
 		TriggeredBy: fmt.Sprintf("slack:msg:%s/%s", msg.Channel, msg.TS),
 	}

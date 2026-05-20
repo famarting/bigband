@@ -7,6 +7,11 @@ import (
 
 	"github.com/famarting/bigband/internal/cli"
 	"github.com/spf13/cobra"
+
+	// Blank-import each agent provider so its init() registers it in the
+	// agent registry. Add new providers here as they're added.
+	_ "github.com/famarting/bigband/internal/agent/claude"
+	_ "github.com/famarting/bigband/internal/agent/claudepty"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".

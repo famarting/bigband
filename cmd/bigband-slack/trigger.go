@@ -36,13 +36,13 @@ func newTriggerListCmd() *cobra.Command {
 				return nil
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "CHANNEL\tFOLDER\tMENTION\tFREEFORM\tCOMMANDS")
+			fmt.Fprintln(w, "CHANNEL\tFOLDER\tMENTION\tFREEFORM\tWORKTREE\tPRE\tPOST\tCOMMANDS")
 			for _, t := range cfg.TriggerChannels {
 				ch := t.Channel
 				if !strings.HasPrefix(ch, "#") && !looksLikeChannelID(ch) {
 					ch = "#" + ch
 				}
-				fmt.Fprintf(w, "%s\t%s\t%v\t%v\t%d\n", ch, t.Folder, t.RequireMention, t.AllowFreeformPrompt, len(t.Commands))
+				fmt.Fprintf(w, "%s\t%s\t%v\t%v\t%s\t%d\t%d\t%d\n", ch, t.Folder, t.RequireMention, t.AllowFreeformPrompt, formatTristate(t.Worktree), len(t.PreExec), len(t.PostExec), len(t.Commands))
 			}
 			return w.Flush()
 		},
@@ -55,6 +55,10 @@ func newTriggerAddCmd() *cobra.Command {
 		folder         string
 		requireMention bool
 		freeform       bool
+		worktree       bool
+		noWorktree     bool
+		preExec        []string
+		postExec       []string
 	)
 	cmd := &cobra.Command{
 		Use:   "add",
@@ -62,6 +66,9 @@ func newTriggerAddCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if channel == "" || folder == "" {
 				return fmt.Errorf("--channel and --folder are required")
+			}
+			if worktree && noWorktree {
+				return fmt.Errorf("--worktree and --no-worktree are mutually exclusive")
 			}
 			if _, err := os.Stat(folder); err != nil {
 				return fmt.Errorf("--folder %q: %w", folder, err)
@@ -79,12 +86,23 @@ func newTriggerAddCmd() *cobra.Command {
 				}
 				out = append(out, t)
 			}
-			out = append(out, TriggerChannel{
+			tc := TriggerChannel{
 				Channel:             channel,
 				Folder:              folder,
 				RequireMention:      requireMention,
 				AllowFreeformPrompt: freeform,
-			})
+				PreExec:             preExec,
+				PostExec:            postExec,
+			}
+			switch {
+			case worktree:
+				t := true
+				tc.Worktree = &t
+			case noWorktree:
+				f := false
+				tc.Worktree = &f
+			}
+			out = append(out, tc)
 			cfg.TriggerChannels = out
 			if err := SaveConfig(cfg); err != nil {
 				return err
@@ -97,7 +115,23 @@ func newTriggerAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&folder, "folder", "", "directory submitted runs execute in (required)")
 	cmd.Flags().BoolVar(&requireMention, "require-mention", true, "only act on @<bot> messages")
 	cmd.Flags().BoolVar(&freeform, "allow-freeform", true, "treat unrecognised messages as ephemeral submit_run prompts")
+	cmd.Flags().BoolVar(&worktree, "worktree", false, "force runs from this channel to use a fresh git worktree (default: daemon default)")
+	cmd.Flags().BoolVar(&noWorktree, "no-worktree", false, "force runs from this channel to execute directly in --folder")
+	cmd.Flags().StringArrayVar(&preExec, "pre-exec", nil, "shell command to run before the Claude turn (repeatable)")
+	cmd.Flags().StringArrayVar(&postExec, "post-exec", nil, "shell command to run after the Claude turn (repeatable)")
 	return cmd
+}
+
+// formatTristate renders an optional bool for tabular display: "true", "false",
+// or "default" when unset (inherit daemon behaviour).
+func formatTristate(b *bool) string {
+	if b == nil {
+		return "default"
+	}
+	if *b {
+		return "true"
+	}
+	return "false"
 }
 
 func newTriggerRmCmd() *cobra.Command {

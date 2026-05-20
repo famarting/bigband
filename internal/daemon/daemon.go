@@ -912,6 +912,7 @@ func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, st *state
 		KeepWorktree:    req.KeepWorktree,
 		Model:           req.Model,
 		Effort:          req.Effort,
+		Agent:           req.Agent,
 		ResumeSessionID: req.ParentSessionID,
 		Ephemeral:       req.Ephemeral,
 		TriggeredBy:     req.TriggeredBy,

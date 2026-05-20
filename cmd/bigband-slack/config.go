@@ -87,19 +87,34 @@ func (r MirrorRule) Patterns() []string {
 }
 
 // TriggerChannel routes inbound Slack messages to bigband runs.
+//
+// Worktree controls whether runs submitted from this channel execute inside a
+// fresh git worktree (true) or directly in Folder (false). Unset (nil) inherits
+// the daemon default. PreExec / PostExec are shell commands the daemon runs
+// before/after the Claude turn; useful for `make deps` or post-run formatters.
+// Individual TriggerCommand entries may override any of these.
 type TriggerChannel struct {
 	Channel             string           `yaml:"channel"`
 	Folder              string           `yaml:"folder"`
 	RequireMention      bool             `yaml:"require_mention,omitempty"`
 	AllowFreeformPrompt bool             `yaml:"allow_freeform_prompt,omitempty"`
+	Worktree            *bool            `yaml:"worktree,omitempty"`
+	PreExec             []string         `yaml:"pre_exec,omitempty"`
+	PostExec            []string         `yaml:"post_exec,omitempty"`
 	Commands            []TriggerCommand `yaml:"commands,omitempty"`
 }
 
-// TriggerCommand maps a regex to an action.
+// TriggerCommand maps a regex to an action. Worktree / PreExec / PostExec,
+// when set, override the parent TriggerChannel's values for runs originating
+// from this command. A nil slice means "inherit"; an explicit empty slice
+// ([]) means "no commands" (clears the channel default).
 type TriggerCommand struct {
-	Match  string `yaml:"match"`
-	Action string `yaml:"action"`           // run | submit
-	Folder string `yaml:"folder,omitempty"` // override channel folder for this command
+	Match    string   `yaml:"match"`
+	Action   string   `yaml:"action"`              // run | submit
+	Folder   string   `yaml:"folder,omitempty"`    // override channel folder for this command
+	Worktree *bool    `yaml:"worktree,omitempty"`  // override channel worktree for this command
+	PreExec  []string `yaml:"pre_exec,omitempty"`  // override channel pre_exec
+	PostExec []string `yaml:"post_exec,omitempty"` // override channel post_exec
 }
 
 // ThreadConfig governs thread-reply behaviour.
