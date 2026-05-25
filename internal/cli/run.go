@@ -17,19 +17,19 @@ import (
 func NewStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:               "stop <name>",
-		Short:             "Stop a running task",
+		Short:             "Stop a running job",
 		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeJobNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			reply, err := ipc.Send(ipc.Cmd{Action: "stop", Task: name})
+			reply, err := ipc.Send(ipc.Cmd{Action: "stop", Job: name})
 			if err != nil {
 				return fmt.Errorf("cannot reach daemon: %w", err)
 			}
 			if !reply.OK {
 				return fmt.Errorf("%s", reply.Error)
 			}
-			fmt.Printf("sent stop signal to task %q\n", name)
+			fmt.Printf("sent stop signal to job %q\n", name)
 			return nil
 		},
 	}
@@ -38,18 +38,18 @@ func NewStopCmd() *cobra.Command {
 func NewRunCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:               "run <name>",
-		Short:             "Fire a task immediately",
+		Short:             "Fire a job immediately",
 		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeJobNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			// Try daemon first.
-			reply, err := ipc.Send(ipc.Cmd{Action: "run", Task: name})
+			reply, err := ipc.Send(ipc.Cmd{Action: "run", Job: name})
 			if err == nil {
 				if !reply.OK {
 					return fmt.Errorf("daemon error: %s", reply.Error)
 				}
-				prevLog, _ := os.Readlink(paths.TaskLogLatest(name))
+				prevLog, _ := os.Readlink(paths.JobLogLatest(name))
 				return waitAndFollowLog(name, prevLog)
 			}
 			// Daemon not running — run inline.
@@ -58,13 +58,13 @@ func NewRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			t := cfg.TaskByName(name)
-			if t == nil {
-				return fmt.Errorf("task %q not found", name)
+			j := cfg.JobByName(name)
+			if j == nil {
+				return fmt.Errorf("job %q not found", name)
 			}
 			st, _ := state.Load()
-			t.ClearJitter() // Don't apply jitter to manual runs.
-			runner.Run(context.Background(), cfg, t, st, os.Stdout, events.NopPublisher{})
+			j.ClearJitter() // Don't apply jitter to manual runs.
+			runner.Run(context.Background(), cfg, j, st, os.Stdout, events.NopPublisher{})
 			return nil
 		},
 	}

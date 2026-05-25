@@ -6,18 +6,18 @@ It is a **separate process** from the bigband daemon and only talks to bigband t
 
 ## The problem
 
-A bigband task scheduled for `Weekdays at ~6:00` only fires if the laptop is awake at 06:00. macOS suspends launchd-managed processes during system sleep, and `robfig/cron` (the scheduler bigband uses) does **not** replay missed firings when the system wakes back up — the cron tick simply doesn't happen.
+A bigband job scheduled for `Weekdays at ~6:00` only fires if the laptop is awake at 06:00. macOS suspends launchd-managed processes during system sleep, and `robfig/cron` (the scheduler bigband uses) does **not** replay missed firings when the system wakes back up — the cron tick simply doesn't happen.
 
-So if you sleep your MacBook overnight and the 06:00 task should have fired, you wake up at 09:00 and notice nothing ran. That's not a bigband bug; that's macOS power management doing its job.
+So if you sleep your MacBook overnight and the 06:00 job should have fired, you wake up at 09:00 and notice nothing ran. That's not a bigband bug; that's macOS power management doing its job.
 
 ## What it does
 
-- Subscribes to `task_run.completed` and `config.reloaded` events from bigband.
-- Reads each enabled scheduled task's `next_run` via the `status` IPC.
+- Subscribes to `job_run.completed` and `config.reloaded` events from bigband.
+- Reads each enabled scheduled job's `next_run` via the `status` IPC.
 - Calls `sudo -n pmset schedule wake "MM/DD/YYYY HH:MM:SS"` to register a one-shot system wake `lead_seconds` before each upcoming firing.
 - Tracks the wake events it owns in `state.json` so cancel-on-shutdown / cancel-on-reconcile only touches **its own** entries — user-added pmset events (Calendar, DoNotDisturb, etc.) are left alone.
 
-End result: a closed-lid MacBook on AC wakes itself ~60 s before each scheduled task, runs it, and goes back to sleep.
+End result: a closed-lid MacBook on AC wakes itself ~60 s before each scheduled job, runs it, and goes back to sleep.
 
 Not on macOS, not on AC, or `enabled: false` → bigband-wake is a logging no-op. It cannot make the daemon fail.
 
@@ -25,7 +25,7 @@ Not on macOS, not on AC, or `enabled: false` → bigband-wake is a logging no-op
 
 ```sh
 make install-wake                  # builds + copies to ~/bin/bigband-wake
-bigband-wake init                  # writes config.yaml + manifest.yaml under ~/.bigband-tasks/extensions/bigband-wake/
+bigband-wake init                  # writes config.yaml + manifest.yaml under ~/.bigband/extensions/bigband-wake/
 bigband-wake setup                 # prints the sudoers stanza (does NOT run sudo)
 ```
 
@@ -60,7 +60,7 @@ Notably **not** granted: `pmset sleepnow`, `pmset displaysleepnow`, `pmset -a` (
 After init + sudoers, flip the switch:
 
 ```sh
-$EDITOR ~/.bigband-tasks/extensions/bigband-wake/config.yaml
+$EDITOR ~/.bigband/extensions/bigband-wake/config.yaml
 # set: enabled: true
 
 bigband ext restart bigband-wake   # or wait for the manifest watcher; either way
@@ -77,13 +77,13 @@ pmset -g sched                     # the new event should be visible
 
 If you want to confirm the daemon-driven path:
 
-1. Trigger a config reload: `touch ~/.bigband-tasks/config.yaml`
-2. `bigband-wake status` — owned events should match the soonest scheduled tasks.
+1. Trigger a config reload: `touch ~/.bigband/config.yaml`
+2. `bigband-wake status` — owned events should match the soonest scheduled jobs.
 3. `bigband ext logs bigband-wake -f` — you should see `reconcile … add=N` lines.
 
 ## Config
 
-`~/.bigband-tasks/extensions/bigband-wake/config.yaml`. Auto-reloaded on every save via `fsnotify`; no restart needed for `enabled` / `lead_seconds` / `max_events` changes.
+`~/.bigband/extensions/bigband-wake/config.yaml`. Auto-reloaded on every save via `fsnotify`; no restart needed for `enabled` / `lead_seconds` / `max_events` changes.
 
 ```yaml
 # Master switch. With enabled:false the daemon idles — no pmset calls.
@@ -127,22 +127,22 @@ bigband ext restart bigband-wake   # bounce
 Single-owner reconciler with five triggers:
 
 1. **Extension startup** — initial reconcile against current `bigband status`.
-2. **`task_run.completed`** event — that task's next-fire just rolled forward.
-3. **`config.reloaded`** event (core) — tasks may have been added / removed / disabled.
+2. **`job_run.completed`** event — that job's next-fire just rolled forward.
+3. **`config.reloaded`** event (core) — jobs may have been added / removed / disabled.
 4. **Hourly safety-net tick** — recovers from any missed event.
 5. **fsnotify on our own `config.yaml`** — `enabled` / `lead_seconds` edits.
 6. **On SIGTERM** — cancel every owned wake before exiting.
 
-Each trigger writes a short reason string into a buffered channel. The reconcile goroutine debounces 500 ms so a burst of task completions coalesces into a single pmset reshuffle. Reconcile diffs `(task, wake_at)` tuples against `state.json` — cancel-removed first, then add-new — and persists the new set atomically.
+Each trigger writes a short reason string into a buffered channel. The reconcile goroutine debounces 500 ms so a burst of job completions coalesces into a single pmset reshuffle. Reconcile diffs `(job, wake_at)` tuples against `state.json` — cancel-removed first, then add-new — and persists the new set atomically.
 
-`state.json` lives at `~/.bigband-tasks/extensions/bigband-wake/state.json`. Cancellation is by **exact local time** because that's how pmset matches; we never `cancelall`, so a hand-added `pmset schedule wake "..."` survives untouched.
+`state.json` lives at `~/.bigband/extensions/bigband-wake/state.json`. Cancellation is by **exact local time** because that's how pmset matches; we never `cancelall`, so a hand-added `pmset schedule wake "..."` survives untouched.
 
 ## Caveats
 
 - **macOS only.** Non-darwin builds are a logging no-op. The manifest's `supervisor` happily spawns them; they just idle.
 - **AC only.** macOS only honors scheduled wakes on AC power by default. On battery, the wake is queued but won't actually fire until the laptop is plugged in.
 - **Lid open vs. closed.** Closed-lid wakes are allowed when on AC and an external display is connected, OR when "Prevent automatic sleep" is set in Energy preferences for a power source. Otherwise the system wakes briefly to fire the cron, then goes back to sleep — which is fine.
-- **DST transitions.** pmset uses local time. Reconcile computes wake times from each task's `next_run`, which the daemon already formats in local time, so DST round-trips correctly. The hourly tick catches any edge case the same day.
+- **DST transitions.** pmset uses local time. Reconcile computes wake times from each job's `next_run`, which the daemon already formats in local time, so DST round-trips correctly. The hourly tick catches any edge case the same day.
 - **No catch-up for missed runs.** If a wake fails to fire (e.g. unplugged), the cron firing is still lost. Adding "fire missed jobs on wake" is a separate feature; bigband-wake is preventative, not corrective.
 
 ## Ethos

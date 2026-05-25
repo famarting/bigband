@@ -6,7 +6,7 @@
 // The manifest is bigband's *generic* contract for "spawn me and route my
 // lifecycle." It deliberately contains no extension-specific fields (no
 // slack:, no notify:): each extension keeps its own config under
-// ~/.bigband-tasks/extensions/<name>/ and reads it at startup from its
+// ~/.bigband/extensions/<name>/ and reads it at startup from its
 // working_dir, exactly as before. The manifest only tells bigband how to
 // invoke that binary and when to restart it.
 package extensions
@@ -23,7 +23,7 @@ import (
 )
 
 // ManifestFilename is the canonical filename a directory under
-// ~/.bigband-tasks/extensions/<name>/ must contain to be discovered.
+// ~/.bigband/extensions/<name>/ must contain to be discovered.
 const ManifestFilename = "manifest.yaml"
 
 // validName mirrors config.IsValidName but with a slightly tighter shape

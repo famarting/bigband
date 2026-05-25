@@ -28,7 +28,7 @@ func NewDaemonLogsCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "daemon-logs",
-		Short: "Show the bigband daemon log (~/.bigband-tasks/daemon.log)",
+		Short: "Show the bigband daemon log (~/.bigband/daemon.log)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := paths.DaemonLog()
 			f, err := os.Open(path)

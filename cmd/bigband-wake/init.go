@@ -25,7 +25,7 @@ const configTemplate = `# bigband-wake configuration.
 # Master switch. Set to true once setup is complete.
 enabled: false
 
-# Seconds to wake before each task's scheduled fire time. 60 gives the
+# Seconds to wake before each job's scheduled fire time. 60 gives the
 # daemon time to thaw before cron triggers.
 lead_seconds: 60
 
@@ -37,6 +37,14 @@ max_events: 16
 # Safety-net cadence: even if every event-bus nudge is missed, reconcile
 # from scratch this often. Minimum 1 minute.
 reconcile_interval: 1h
+
+# How long to hold an IOPMAssertion (the programmatic equivalent of
+# ` + "`caffeinate -i`" + `) after we detect a wake-from-sleep transition. macOS may
+# only dark-wake for ~30s in response to a pmset wake — too short for the
+# bigband daemon's cron tick to fire. Holding this assertion keeps the
+# laptop awake long enough for the scheduled job to launch. Set to "0" to
+# disable.
+assertion_duration: 45m
 `
 
 // manifestTemplate is the supervisor manifest. The bigband daemon discovers
@@ -66,7 +74,7 @@ restart:
   max_consecutive_failures: 5
 
 subscribes:
-  - task_run.completed
+  - job_run.completed
   - config.reloaded
 `
 
@@ -80,7 +88,7 @@ func newInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Scaffold the bigband-wake config and manifest",
 		Long: `Writes config.yaml and manifest.yaml into
-~/.bigband-tasks/extensions/bigband-wake/. Neither file is overwritten by
+~/.bigband/extensions/bigband-wake/. Neither file is overwritten by
 default. Use --force-config or --force-manifest to overwrite.
 
 After init, run ` + "`bigband-wake setup`" + ` and follow the printed
@@ -158,8 +166,8 @@ func newStatusCmd() *cobra.Command {
 				fmt.Println("  (none)")
 			}
 			for _, e := range st.Sorted() {
-				fmt.Printf("  - task=%-30s wake=%s  fire=%s\n",
-					e.Task,
+				fmt.Printf("  - job=%-30s wake=%s  fire=%s\n",
+					e.Job,
 					e.WakeAt.Local().Format("2006-01-02 15:04:05"),
 					e.FireAt.Local().Format("2006-01-02 15:04:05"))
 			}

@@ -37,7 +37,7 @@ func NewSubscribersCmd() *cobra.Command {
 				return nil
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "NAME\tCONNECTED FOR\tTYPES\tTASKS\tLAG DROPPED")
+			fmt.Fprintln(w, "NAME\tCONNECTED FOR\tTYPES\tJOBS\tLAG DROPPED")
 			now := time.Now().UTC()
 			for _, s := range payload.Subscribers {
 				dur := now.Sub(s.ConnectedAt).Round(time.Second)
@@ -45,11 +45,11 @@ func NewSubscribersCmd() *cobra.Command {
 				if types == "" {
 					types = "*"
 				}
-				tasks := strings.Join(s.Tasks, ",")
-				if tasks == "" {
-					tasks = "*"
+				jobs := strings.Join(s.Jobs, ",")
+				if jobs == "" {
+					jobs = "*"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\n", s.Name, dur, types, tasks, s.LagDropped)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\n", s.Name, dur, types, jobs, s.LagDropped)
 			}
 			return w.Flush()
 		},

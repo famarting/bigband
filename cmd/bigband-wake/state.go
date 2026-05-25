@@ -16,7 +16,7 @@ import (
 //
 //	{
 //	  "events": [
-//	    {"task": "my-buddy-kickoff", "wake_at": "2026-05-11T05:59:00+02:00",
+//	    {"job": "my-buddy-kickoff", "wake_at": "2026-05-11T05:59:00+02:00",
 //	     "fire_at":  "2026-05-11T06:00:00+02:00",
 //	     "scheduled_at": "2026-05-11T03:00:00+02:00"}
 //	  ]
@@ -30,7 +30,7 @@ type State struct {
 
 // WakeEvent is one pmset wake entry this extension owns.
 type WakeEvent struct {
-	Task        string    `json:"task"`
+	Job         string    `json:"job"`
 	WakeAt      time.Time `json:"wake_at"`
 	FireAt      time.Time `json:"fire_at"`
 	ScheduledAt time.Time `json:"scheduled_at"`

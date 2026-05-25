@@ -23,23 +23,23 @@ func NewValidateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Config OK — %d task(s), %d template(s)\n", len(cfg.Tasks), len(cfg.Templates))
-			for _, t := range cfg.Tasks {
-				cronExpr, hasJitter, _ := schedule.Parse(t.Schedule)
+			fmt.Printf("Config OK — %d job(s), %d template(s)\n", len(cfg.Jobs), len(cfg.Templates))
+			for _, j := range cfg.Jobs {
+				cronExpr, hasJitter, _ := schedule.Parse(j.Schedule)
 				jitterStr := ""
 				if hasJitter {
-					j := cfg.Defaults.Jitter.Duration
-					if t.JitterDuration() > 0 {
-						j = t.JitterDuration()
+					jt := cfg.Defaults.Jitter.Duration
+					if j.JitterDuration() > 0 {
+						jt = j.JitterDuration()
 					}
-					jitterStr = fmt.Sprintf(" (±%s jitter)", j)
+					jitterStr = fmt.Sprintf(" (±%s jitter)", jt)
 				}
 				enabled := "enabled"
-				if !t.IsEnabled() {
+				if !j.IsEnabled() {
 					enabled = "disabled"
 				}
 				fmt.Printf("  %-24s  %s → cron: %s%s  [%s]\n",
-					t.Name, t.Schedule, cronExpr, jitterStr, enabled)
+					j.Name, j.Schedule, cronExpr, jitterStr, enabled)
 			}
 			for _, t := range cfg.Templates {
 				fmt.Printf("  %-24s  [template]\n", t.Name)

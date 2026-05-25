@@ -1,7 +1,7 @@
 // Package events is bigband's lifecycle event bus.
 //
 // It exposes a typed Envelope, a Bus with append-only JSONL persistence, and a
-// fan-out Subscribe API. The runner publishes events as a task progresses; the
+// fan-out Subscribe API. The runner publishes events as a job progresses; the
 // daemon's IPC subscribe action streams them to long-running extensions; humans
 // (and ad-hoc shell pipelines) can also tail the JSONL file directly.
 //
@@ -42,13 +42,13 @@ type (
 
 // Re-export the closed Type constants.
 const (
-	TypeTaskRunStarted       = bigbandext.TypeTaskRunStarted
-	TypeTaskRunWorktreeReady = bigbandext.TypeTaskRunWorktreeReady
+	TypeJobRunStarted        = bigbandext.TypeJobRunStarted
+	TypeJobRunWorktreeReady  = bigbandext.TypeJobRunWorktreeReady
 	TypeClaudeSessionStarted = bigbandext.TypeClaudeSessionStarted
 	TypeClaudeTurnCompleted  = bigbandext.TypeClaudeTurnCompleted
 	TypeClaudeWakeup         = bigbandext.TypeClaudeWakeup
-	TypeTaskRunCompleted     = bigbandext.TypeTaskRunCompleted
-	TypeTaskRunPreFailed     = bigbandext.TypeTaskRunPreFailed
+	TypeJobRunCompleted      = bigbandext.TypeJobRunCompleted
+	TypeJobRunPreFailed      = bigbandext.TypeJobRunPreFailed
 	TypeSubscriberLagged     = bigbandext.TypeSubscriberLagged
 	TypeExtensionStarted     = bigbandext.TypeExtensionStarted
 	TypeExtensionExited      = bigbandext.TypeExtensionExited
@@ -88,7 +88,7 @@ type subscription struct {
 type SubscriberInfo struct {
 	Name        string    `json:"name"`
 	Types       []Type    `json:"types,omitempty"`
-	Tasks       []string  `json:"tasks,omitempty"`
+	Jobs        []string  `json:"jobs,omitempty"`
 	ConnectedAt time.Time `json:"connected_at"`
 	LagDropped  int       `json:"lag_dropped,omitempty"`
 }
@@ -103,7 +103,7 @@ func (b *Bus) Subscribers() []SubscriberInfo {
 		out = append(out, SubscriberInfo{
 			Name:        s.name,
 			Types:       s.filter.Types,
-			Tasks:       s.filter.Tasks,
+			Jobs:        s.filter.Jobs,
 			ConnectedAt: s.connectedAt,
 			LagDropped:  s.lagDropped,
 		})

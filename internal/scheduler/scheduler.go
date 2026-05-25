@@ -16,20 +16,20 @@ type entry struct {
 	hash string
 }
 
-// Scheduler wraps cron.Cron and live-reloads tasks on config change.
+// Scheduler wraps cron.Cron and live-reloads jobs on config change.
 type Scheduler struct {
 	mu          sync.Mutex
 	c           *cron.Cron
-	entries     map[string]entry // task name → cron entry (scheduled tasks only)
-	oneOffFired map[string]bool  // one-off tasks fired this session
-	handler     func(*config.Config, *config.Task)
-	hasFired    func(string) bool // returns true if task has a persisted run record
+	entries     map[string]entry // job name → cron entry (scheduled jobs only)
+	oneOffFired map[string]bool  // one-off jobs fired this session
+	handler     func(*config.Config, *config.Job)
+	hasFired    func(string) bool // returns true if job has a persisted run record
 }
 
-// New returns a running Scheduler. handler is called for each fired task.
-// hasFired is called for one-off tasks to check whether they already ran in a
+// New returns a running Scheduler. handler is called for each fired job.
+// hasFired is called for one-off jobs to check whether they already ran in a
 // previous session (prevents re-firing after a daemon restart).
-func New(handler func(*config.Config, *config.Task), hasFired func(string) bool) *Scheduler {
+func New(handler func(*config.Config, *config.Job), hasFired func(string) bool) *Scheduler {
 	s := &Scheduler{
 		entries:     make(map[string]entry),
 		oneOffFired: make(map[string]bool),
@@ -47,57 +47,57 @@ func (s *Scheduler) Reload(cfg *config.Config) {
 	defer s.mu.Unlock()
 
 	next := make(map[string]bool)
-	for _, task := range cfg.Tasks {
-		if !task.IsEnabled() {
+	for _, job := range cfg.Jobs {
+		if !job.IsEnabled() {
 			continue
 		}
-		next[task.Name] = true
+		next[job.Name] = true
 
-		// One-off tasks are fired immediately on first Reload, not via cron.
-		if task.IsOneOff() {
-			if !s.oneOffFired[task.Name] && !s.hasFired(task.Name) {
-				s.oneOffFired[task.Name] = true
-				c, t := cfg, task
-				log.Printf("bigband: firing one-off task %q immediately", task.Name)
-				s.handler(c, t)
+		// One-off jobs are fired immediately on first Reload, not via cron.
+		if job.IsOneOff() {
+			if !s.oneOffFired[job.Name] && !s.hasFired(job.Name) {
+				s.oneOffFired[job.Name] = true
+				c, j := cfg, job
+				log.Printf("bigband: firing one-off job %q immediately", job.Name)
+				s.handler(c, j)
 			}
 			continue
 		}
 
-		h := taskHash(task)
-		if existing, ok := s.entries[task.Name]; ok && existing.hash == h {
+		h := jobHash(job)
+		if existing, ok := s.entries[job.Name]; ok && existing.hash == h {
 			continue // unchanged
 		}
 		// Remove old entry if it exists.
-		if existing, ok := s.entries[task.Name]; ok {
+		if existing, ok := s.entries[job.Name]; ok {
 			s.c.Remove(existing.id)
 		}
-		t := task // capture
-		c := cfg  // capture
-		id, err := s.c.AddFunc(task.CronExpr(), func() {
-			log.Printf("bigband: running scheduled task %q", t.Name)
-			s.handler(c, t)
+		j := job // capture
+		c := cfg // capture
+		id, err := s.c.AddFunc(job.CronExpr(), func() {
+			log.Printf("bigband: running scheduled job %q", j.Name)
+			s.handler(c, j)
 		})
 		if err != nil {
-			log.Printf("bigband: scheduling task %q failed: %v", task.Name, err)
+			log.Printf("bigband: scheduling job %q failed: %v", job.Name, err)
 			continue
 		}
-		s.entries[task.Name] = entry{id: id, hash: h}
-		log.Printf("bigband: scheduled task %q (%s)", task.Name, task.CronExpr())
+		s.entries[job.Name] = entry{id: id, hash: h}
+		log.Printf("bigband: scheduled job %q (%s)", job.Name, job.CronExpr())
 	}
 
-	// Remove scheduled tasks that are no longer in config or are disabled.
+	// Remove scheduled jobs that are no longer in config or are disabled.
 	for name, e := range s.entries {
 		if !next[name] {
 			s.c.Remove(e.id)
 			delete(s.entries, name)
-			log.Printf("bigband: removed task %q", name)
+			log.Printf("bigband: removed job %q", name)
 		}
 	}
 }
 
-// NextRuns returns a map of task name → next scheduled time string.
-// One-off tasks are not included; their status is derived from state.
+// NextRuns returns a map of job name → next scheduled time string.
+// One-off jobs are not included; their status is derived from state.
 func (s *Scheduler) NextRuns() map[string]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -114,7 +114,7 @@ func (s *Scheduler) NextRuns() map[string]string {
 // Stop halts the underlying cron runner.
 func (s *Scheduler) Stop() { s.c.Stop() }
 
-func taskHash(t *config.Task) string {
-	h := sha256.Sum256(fmt.Appendf(nil, "%s|%s|%v", t.Name, t.CronExpr(), t.IsEnabled()))
+func jobHash(j *config.Job) string {
+	h := sha256.Sum256(fmt.Appendf(nil, "%s|%s|%v", j.Name, j.CronExpr(), j.IsEnabled()))
 	return fmt.Sprintf("%x", h[:8])
 }

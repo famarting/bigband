@@ -99,10 +99,10 @@ func handleSlackFakeConn(conn net.Conn, _ int) {
 	if err := json.NewDecoder(conn).Decode(&c); err != nil {
 		return
 	}
-	taskName := "oneoff-fake"
-	runID := taskName + "/2024-01-01T00-00-00Z"
+	jobName := "oneoff-fake"
+	runID := jobName + "/2024-01-01T00-00-00Z"
 	payload, _ := json.Marshal(bigbandext.SubmitRunReply{
-		RunID: runID, TaskName: taskName, LogPath: "/tmp/fake.log",
+		RunID: runID, JobName: jobName, LogPath: "/tmp/fake.log",
 	})
 	type reply struct {
 		OK      bool            `json:"ok"`
@@ -118,11 +118,11 @@ func TestHandleEvent_SessionStarted_Valid(t *testing.T) {
 	data := bigbandext.ClaudeSessionStartedData{SessionID: "session-abc"}
 	raw, _ := json.Marshal(data)
 	r.HandleEvent(bigbandext.Envelope{
-		Type:     bigbandext.TypeClaudeSessionStarted,
-		TaskName: "my-task",
-		Data:     raw,
+		Type:    bigbandext.TypeClaudeSessionStarted,
+		JobName: "my-job",
+		Data:    raw,
 	})
-	if mapping := r.store.Tasks["my-task"]; mapping.SessionID != "session-abc" {
+	if mapping := r.store.Jobs["my-job"]; mapping.SessionID != "session-abc" {
 		t.Errorf("want session-abc stored, got %q", mapping.SessionID)
 	}
 }
@@ -130,31 +130,31 @@ func TestHandleEvent_SessionStarted_Valid(t *testing.T) {
 func TestHandleEvent_SessionStarted_MalformedJSON(t *testing.T) {
 	r, slack := newSlackRouter(t)
 	r.HandleEvent(bigbandext.Envelope{
-		Type:     bigbandext.TypeClaudeSessionStarted,
-		TaskName: "my-task",
-		Data:     []byte("not json {{{"),
+		Type:    bigbandext.TypeClaudeSessionStarted,
+		JobName: "my-job",
+		Data:    []byte("not json {{{"),
 	})
 	if len(slack.posted) != 0 {
 		t.Errorf("no Slack post expected on malformed JSON, got %d", len(slack.posted))
 	}
 }
 
-// --- HandleEvent: TaskRunCompleted ---
+// --- HandleEvent: JobRunCompleted ---
 
 func TestHandleEvent_Completed_PostsToSlack(t *testing.T) {
 	r, slack := newSlackRouter(t)
 	r.cfg = &Config{
 		Mirror: []MirrorRule{
-			{Task: "my-task", Channel: "C12345", OnFailure: true, IncludeStatus: true},
+			{Job: "my-job", Channel: "C12345", OnFailure: true, IncludeStatus: true},
 		},
 	}
-	data := bigbandext.TaskRunCompletedData{Status: "ok", DurationMS: 1000, FinalMessage: "All done!"}
+	data := bigbandext.JobRunCompletedData{Status: "ok", DurationMS: 1000, FinalMessage: "All done!"}
 	raw, _ := json.Marshal(data)
 	r.HandleEvent(bigbandext.Envelope{
-		Type:     bigbandext.TypeTaskRunCompleted,
-		TaskName: "my-task",
-		RunID:    "my-task/2024-01-01T00-00-00Z",
-		Data:     raw,
+		Type:    bigbandext.TypeJobRunCompleted,
+		JobName: "my-job",
+		RunID:   "my-job/2024-01-01T00-00-00Z",
+		Data:    raw,
 	})
 	if len(slack.posted) == 0 {
 		t.Error("expected a Slack message to be posted")
@@ -166,13 +166,13 @@ func TestHandleEvent_Completed_PostsToSlack(t *testing.T) {
 func TestHandleEvent_Completed_NoMatchingRule(t *testing.T) {
 	r, slack := newSlackRouter(t)
 	r.cfg = &Config{Mirror: []MirrorRule{}}
-	data := bigbandext.TaskRunCompletedData{Status: "ok", FinalMessage: "Done"}
+	data := bigbandext.JobRunCompletedData{Status: "ok", FinalMessage: "Done"}
 	raw, _ := json.Marshal(data)
 	r.HandleEvent(bigbandext.Envelope{
-		Type:     bigbandext.TypeTaskRunCompleted,
-		TaskName: "unmatched-task",
-		RunID:    "unmatched-task/2024-01-01T00-00-00Z",
-		Data:     raw,
+		Type:    bigbandext.TypeJobRunCompleted,
+		JobName: "unmatched-job",
+		RunID:   "unmatched-job/2024-01-01T00-00-00Z",
+		Data:    raw,
 	})
 	if len(slack.posted) != 0 {
 		t.Errorf("expected no Slack post, got %d", len(slack.posted))
@@ -186,11 +186,11 @@ func TestHandleSlackMessage_ThreadFound(t *testing.T) {
 	r.cfg = &Config{Threads: ThreadConfig{Enabled: true}}
 	r.bb = startSlackFakeDaemon(t)
 
-	// Seed store with a thread mapping (LinkTaskMeta before LinkRun mirrors
+	// Seed store with a thread mapping (LinkJobMeta before LinkRun mirrors
 	// the real event order: folder/session staged before completion is posted).
-	_ = r.store.LinkTaskMeta("my-task", t.TempDir(), "")
-	_ = r.store.SetTaskSessionID("my-task", "session-xyz")
-	_ = r.store.LinkRun("run-123", "my-task", "C-chan", "thread-ts", "session-xyz", true)
+	_ = r.store.LinkJobMeta("my-job", t.TempDir(), "")
+	_ = r.store.SetJobSessionID("my-job", "session-xyz")
+	_ = r.store.LinkRun("run-123", "my-job", "C-chan", "thread-ts", "session-xyz", true)
 
 	msg := SlackMessage{
 		Channel: "C-chan", User: "U1", Text: "follow up", TS: "ts-new", ThreadTS: "thread-ts",
@@ -202,7 +202,7 @@ func TestHandleSlackMessage_ThreadFound(t *testing.T) {
 
 // TestHandleSlackMessage_ThreadFound_LinkRunBeforeMeta exercises the submitOneOffRaw
 // order: LinkRun is called first (sessionID="", folder not yet known), then
-// LinkTaskMeta fills in the folder. The thread snapshot must get the folder so
+// LinkJobMeta fills in the folder. The thread snapshot must get the folder so
 // a follow-up reply doesn't hit "no folder known for this thread".
 func TestHandleSlackMessage_ThreadFound_LinkRunBeforeMeta(t *testing.T) {
 	r, _ := newSlackRouter(t)
@@ -210,16 +210,16 @@ func TestHandleSlackMessage_ThreadFound_LinkRunBeforeMeta(t *testing.T) {
 	r.bb = startSlackFakeDaemon(t)
 
 	folder := t.TempDir()
-	// submitOneOffRaw order: LinkRun first (no folder/session yet), then LinkTaskMeta.
-	_ = r.store.LinkRun("run-xyz", "my-task", "C-chan", "thread-ts", "", true)
-	_ = r.store.LinkTaskMeta("my-task", folder, "")
-	_ = r.store.SetTaskSessionID("my-task", "session-xyz")
+	// submitOneOffRaw order: LinkRun first (no folder/session yet), then LinkJobMeta.
+	_ = r.store.LinkRun("run-xyz", "my-job", "C-chan", "thread-ts", "", true)
+	_ = r.store.LinkJobMeta("my-job", folder, "")
+	_ = r.store.SetJobSessionID("my-job", "session-xyz")
 
 	msg := SlackMessage{
 		Channel: "C-chan", User: "U1", Text: "follow up", TS: "ts-new", ThreadTS: "thread-ts",
 	}
 	if handled := r.HandleSlackMessage(msg); !handled {
-		t.Error("expected message to be handled — folder should propagate even when LinkRun precedes LinkTaskMeta")
+		t.Error("expected message to be handled — folder should propagate even when LinkRun precedes LinkJobMeta")
 	}
 }
 
@@ -252,7 +252,7 @@ func TestRunChannelCommand_Valid(t *testing.T) {
 		Folder: t.TempDir(),
 	}
 	re := regexp.MustCompile(cmd.Match)
-	match := re.FindStringSubmatch("submit mytask do the thing")
+	match := re.FindStringSubmatch("submit myjob do the thing")
 	if match == nil {
 		t.Fatal("regex did not match")
 	}

@@ -11,7 +11,7 @@ import (
 	"github.com/famarting/bigband/internal/paths"
 )
 
-// RunStatus is the outcome of a task run.
+// RunStatus is the outcome of a job run.
 type RunStatus string
 
 const (
@@ -25,8 +25,8 @@ const (
 	StatusUnknown   RunStatus = "unknown" // orphan exited without tracking
 )
 
-// TaskState holds persisted info about a task.
-type TaskState struct {
+// JobState holds persisted info about a job.
+type JobState struct {
 	LastRun       *time.Time `json:"last_run,omitempty"`
 	LastStatus    RunStatus  `json:"last_status,omitempty"`
 	LastDuration  string     `json:"last_duration,omitempty"`
@@ -35,27 +35,54 @@ type TaskState struct {
 	RunningPID    int        `json:"running_pid,omitempty"`
 	WorktreePath  string     `json:"worktree_path,omitempty"`
 	SessionID     string     `json:"session_id,omitempty"`
-	// Folder is the directory the most recent run executed in (i.e. task.Folder
+	// Folder is the directory the most recent run executed in (i.e. job.Folder
 	// at runner start, before any worktree creation). Recorded so ephemeral
 	// submissions — which never appear in config.yaml — remain followable.
 	Folder string `json:"folder,omitempty"`
-	// KeepWorktree mirrors the task's keep_worktree setting at run time.
+	// KeepWorktree mirrors the job's keep_worktree setting at run time.
 	// Persisted so the retention prune can skip worktree-owning ephemerals that
-	// an extension (e.g. bigband-workflows) still relies on. Configured tasks
+	// an extension still relies on. Configured jobs
 	// are never pruned regardless, so this only affects submitted ephemerals.
 	KeepWorktree bool `json:"keep_worktree,omitempty"`
+
+	// Last-run input parameters — captured at run start so a job can be
+	// re-fired (`bigband rerun`) using exactly what it was last given. For
+	// configured jobs this duplicates config.yaml; for ephemeral submits this
+	// is the only durable record of the prompt once logs are pruned.
+	Prompt   string   `json:"prompt,omitempty"`
+	PreExec  []string `json:"pre_exec,omitempty"`
+	PostExec []string `json:"post_exec,omitempty"`
+	Worktree *bool    `json:"worktree,omitempty"`
+	Timeout  string   `json:"timeout,omitempty"` // e.g. "2h"; empty inherits defaults
+	Model    string   `json:"model,omitempty"`
+	Effort   string   `json:"effort,omitempty"`
+	Agent    string   `json:"agent,omitempty"`
+}
+
+// JobParams is the subset of a Job's run-time parameters we persist into
+// state so the run is reproducible. State avoids importing config so the
+// runner translates from *config.Job into this neutral struct.
+type JobParams struct {
+	Prompt   string
+	PreExec  []string
+	PostExec []string
+	Worktree *bool
+	Timeout  string
+	Model    string
+	Effort   string
+	Agent    string
 }
 
 // State is the full state file.
 type State struct {
-	mu    sync.Mutex
-	path  string
-	Tasks map[string]*TaskState `json:"tasks"`
+	mu   sync.Mutex
+	path string
+	Jobs map[string]*JobState `json:"jobs"`
 }
 
 // Load reads or creates the state file.
 func Load() (*State, error) {
-	s := &State{path: paths.StateFile(), Tasks: map[string]*TaskState{}}
+	s := &State{path: paths.StateFile(), Jobs: map[string]*JobState{}}
 	data, err := os.ReadFile(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -69,29 +96,29 @@ func Load() (*State, error) {
 	return s, nil
 }
 
-func (s *State) get(name string) *TaskState {
-	ts := s.Tasks[name]
-	if ts == nil {
-		ts = &TaskState{}
-		s.Tasks[name] = ts
+func (s *State) get(name string) *JobState {
+	js := s.Jobs[name]
+	if js == nil {
+		js = &JobState{}
+		s.Jobs[name] = js
 	}
-	return ts
+	return js
 }
 
-// SetRunning marks a task as running with the given PID and records the
-// folder the run is executing from. folder is the original task.Folder before
+// SetRunning marks a job as running with the given PID and records the
+// folder the run is executing from. folder is the original job.Folder before
 // any worktree resolution; passing "" leaves the existing value unchanged.
 func (s *State) SetRunning(name string, pid int, folder string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ts := s.get(name)
-	ts.RunningPID = pid
+	js := s.get(name)
+	js.RunningPID = pid
 	if folder != "" {
-		ts.Folder = folder
+		js.Folder = folder
 	}
 	now := time.Now()
-	ts.LastRun = &now
-	ts.LastStatus = StatusRunning
+	js.LastRun = &now
+	js.LastStatus = StatusRunning
 	return s.save()
 }
 
@@ -100,12 +127,34 @@ func (s *State) SetRunning(name string, pid int, folder string) error {
 func (s *State) SetDone(name string, status RunStatus, dur time.Duration, logPath, replyFile string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ts := s.get(name)
-	ts.RunningPID = 0
-	ts.LastStatus = status
-	ts.LastDuration = dur.Round(time.Second).String()
-	ts.LastLog = logPath
-	ts.LastReplyFile = replyFile
+	js := s.get(name)
+	js.RunningPID = 0
+	js.LastStatus = status
+	js.LastDuration = dur.Round(time.Second).String()
+	js.LastLog = logPath
+	js.LastReplyFile = replyFile
+	return s.save()
+}
+
+// SetJobParams records the input parameters the run was started with. Called
+// from the runner once per run so the state row always reflects the latest
+// invocation — enabling `bigband rerun` and self-describing `bigband get` for
+// ephemeral submits whose log may have been pruned.
+//
+// Slices are copied so later mutations on the caller's job don't leak into
+// state.
+func (s *State) SetJobParams(name string, p JobParams) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	js := s.get(name)
+	js.Prompt = p.Prompt
+	js.PreExec = append([]string(nil), p.PreExec...)
+	js.PostExec = append([]string(nil), p.PostExec...)
+	js.Worktree = p.Worktree
+	js.Timeout = p.Timeout
+	js.Model = p.Model
+	js.Effort = p.Effort
+	js.Agent = p.Agent
 	return s.save()
 }
 
@@ -113,18 +162,18 @@ func (s *State) SetDone(name string, status RunStatus, dur time.Duration, logPat
 func (s *State) SetSessionID(name, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ts := s.get(name)
-	ts.SessionID = id
+	js := s.get(name)
+	js.SessionID = id
 	return s.save()
 }
 
-// SetWorktreePath records the worktree path for a running task.
+// SetWorktreePath records the worktree path for a running job.
 // Pass an empty string to clear it after cleanup.
 func (s *State) SetWorktreePath(name, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ts := s.get(name)
-	ts.WorktreePath = path
+	js := s.get(name)
+	js.WorktreePath = path
 	return s.save()
 }
 
@@ -134,30 +183,30 @@ func (s *State) SetWorktreePath(name, path string) error {
 func (s *State) SetWorktreeKept(name, path string, keep bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ts := s.get(name)
-	ts.WorktreePath = path
-	ts.KeepWorktree = keep
+	js := s.get(name)
+	js.WorktreePath = path
+	js.KeepWorktree = keep
 	return s.save()
 }
 
-// Get returns a copy of the task state.
-func (s *State) Get(name string) TaskState {
+// Get returns a copy of the job state.
+func (s *State) Get(name string) JobState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ts := s.Tasks[name]; ts != nil {
-		return *ts
+	if js := s.Jobs[name]; js != nil {
+		return *js
 	}
-	return TaskState{}
+	return JobState{}
 }
 
-// RemoveTask deletes the named entry from state. No-op when absent.
-func (s *State) RemoveTask(name string) error {
+// RemoveJob deletes the named entry from state. No-op when absent.
+func (s *State) RemoveJob(name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.Tasks[name]; !ok {
+	if _, ok := s.Jobs[name]; !ok {
 		return nil
 	}
-	delete(s.Tasks, name)
+	delete(s.Jobs, name)
 	return s.save()
 }
 
@@ -170,37 +219,37 @@ type RemovedEphemeral struct {
 	WorktreePath string
 }
 
-// RemoveStaleEphemerals drops state entries for tasks not in the configured
+// RemoveStaleEphemerals drops state entries for jobs not in the configured
 // set whose LastRun is before cutoff and which are not currently running.
 // Returns the removed entries (caller is expected to clean up logs/worktrees).
 //
 // Ephemeral here means "submitted via IPC, never written to config.yaml" —
-// configured tasks (whose names are in `configured`) are never touched, even
+// configured jobs (whose names are in `configured`) are never touched, even
 // when their last run is ancient.
 func (s *State) RemoveStaleEphemerals(configured map[string]bool, cutoff time.Time) []RemovedEphemeral {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var removed []RemovedEphemeral
-	for name, ts := range s.Tasks {
-		if configured[name] || ts == nil {
+	for name, js := range s.Jobs {
+		if configured[name] || js == nil {
 			continue
 		}
-		if ts.RunningPID != 0 {
+		if js.RunningPID != 0 {
 			continue
 		}
-		// Worktrees retained at the owner's request (extensions like
-		// bigband-workflows) must outlive their last run. Their owners are
+		// Worktrees retained at the owner's request must outlive
+		// their last run. Their owners are
 		// responsible for explicit cleanup via `bigband rm` / Forget.
-		if ts.KeepWorktree && ts.WorktreePath != "" {
+		if js.KeepWorktree && js.WorktreePath != "" {
 			continue
 		}
-		if ts.LastRun == nil || ts.LastRun.Before(cutoff) {
+		if js.LastRun == nil || js.LastRun.Before(cutoff) {
 			removed = append(removed, RemovedEphemeral{
 				Name:         name,
-				Folder:       ts.Folder,
-				WorktreePath: ts.WorktreePath,
+				Folder:       js.Folder,
+				WorktreePath: js.WorktreePath,
 			})
-			delete(s.Tasks, name)
+			delete(s.Jobs, name)
 		}
 	}
 	if len(removed) > 0 {

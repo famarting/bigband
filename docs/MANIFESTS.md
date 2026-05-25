@@ -3,7 +3,7 @@
 A **manifest** is bigband's contract for "spawn me and route my lifecycle." It lives at:
 
 ```
-~/.bigband-tasks/extensions/<name>/manifest.yaml
+~/.bigband/extensions/<name>/manifest.yaml
 ```
 
 When the bigband daemon starts (or a manifest appears via fsnotify), it reads each manifest and runs the declared command as a long-lived child process. Crashes are restarted with exponential backoff. The user only ever installs **one** LaunchAgent — the bigband daemon itself.
@@ -35,7 +35,7 @@ restart:
   max_backoff: 30s
   max_consecutive_failures: 5          # circuit-break after N rapid failures (0 = unlimited)
 
-subscribes: [task_run.completed]       # advisory in v1; reserved for future capability gating
+subscribes: [job_run.completed]       # advisory in v1; reserved for future capability gating
 ```
 
 ### Field-by-field
@@ -55,7 +55,7 @@ Unknown top-level fields are rejected at parse time so typos surface immediately
 
 ## Lifecycle
 
-The daemon publishes three event types as it supervises children. They flow through the same event bus and JSONL file as task events:
+The daemon publishes three event types as it supervises children. They flow through the same event bus and JSONL file as job events:
 
 | Type | Payload (selected fields) |
 |---|---|
@@ -91,15 +91,15 @@ bigband ext disable <name>      # set enabled: false in the manifest
 ```yaml
 name: bigband-slack
 command: [bigband-slack, daemon]
-description: "Slack mirror — opt-in per task in extensions/bigband-slack/config.yaml"
+description: "Slack mirror — opt-in per job in extensions/bigband-slack/config.yaml"
 env:
   PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
   SLACK_APP_TOKEN: "${env:SLACK_APP_TOKEN}"
   SLACK_BOT_TOKEN: "${env:SLACK_BOT_TOKEN}"
 subscribes:
   - claude.session_started
-  - task_run.worktree_ready
-  - task_run.completed
+  - job_run.worktree_ready
+  - job_run.completed
 ```
 
 ### macOS Notification Center (bash)
@@ -109,10 +109,10 @@ name: notify-sh
 command: [/bin/bash, /Users/me/work/bigband/examples/extensions/notify-sh/notify.sh]
 env:
   PATH: "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-  NOTIFY_TASKS: "*"
+  NOTIFY_JOBS: "*"
 restart:
   policy: always       # script's reconnect loop is internal, but restart on any exit anyway
-subscribes: [task_run.completed]
+subscribes: [job_run.completed]
 ```
 
 ## How this differs from a per-extension LaunchAgent

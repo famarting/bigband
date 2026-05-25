@@ -16,9 +16,9 @@ import (
 func NewTemplateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "template",
-		Short: "Manage reusable task templates",
-		Long: `Templates are reusable task definitions stored alongside tasks but
-never scheduled. Use them as a starting point for new tasks via
+		Short: "Manage reusable job templates",
+		Long: `Templates are reusable job definitions stored alongside jobs but
+never scheduled. Use them as a starting point for new jobs via
 'bigband add --from <template>'.`,
 	}
 	cmd.AddCommand(
@@ -134,24 +134,24 @@ func newTemplateAddCmd() *cobra.Command {
 		Use:   "add",
 		Short: "Add a template (interactive wizard)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			var seed *config.Task
+			var seed *config.Job
 			if from != "" {
 				cfg, err := config.Load(paths.Config())
 				if err != nil {
 					return err
 				}
-				t, kind := cfg.FindTaskOrTemplate(from)
-				if t == nil {
-					return fmt.Errorf("no task or template named %q", from)
+				j, kind := cfg.FindJobOrTemplate(from)
+				if j == nil {
+					return fmt.Errorf("no job or template named %q", from)
 				}
 				fmt.Printf("seeding template from %s %q\n", kind, from)
-				seed = t
+				seed = j
 			}
 			return addTemplateWizard(seed)
 		},
 	}
-	cmd.Flags().StringVar(&from, "from", "", "seed wizard fields from an existing task or template")
-	cmd.RegisterFlagCompletionFunc("from", completeTaskOrTemplateNames)
+	cmd.Flags().StringVar(&from, "from", "", "seed wizard fields from an existing job or template")
+	cmd.RegisterFlagCompletionFunc("from", completeJobOrTemplateNames)
 	return cmd
 }
 
@@ -195,29 +195,29 @@ func newTemplateGetCmd() *cobra.Command {
 func newTemplateSaveCmd() *cobra.Command {
 	var as string
 	cmd := &cobra.Command{
-		Use:               "save <task>",
-		Short:             "Save an existing task as a template",
-		Long:              "Copies a task's fields (minus schedule) into a new template. Use --as to rename.",
+		Use:               "save <job>",
+		Short:             "Save an existing job as a template",
+		Long:              "Copies a job's fields (minus schedule) into a new template. Use --as to rename.",
 		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeJobNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			taskName := args[0]
+			jobName := args[0]
 			tmplName := as
 			if tmplName == "" {
-				tmplName = taskName
+				tmplName = jobName
 			}
 			tmplName, err := normalizeName(tmplName)
 			if err != nil {
 				return err
 			}
-			return saveTaskAsTemplate(taskName, tmplName)
+			return saveJobAsTemplate(jobName, tmplName)
 		},
 	}
-	cmd.Flags().StringVar(&as, "as", "", "name for the new template (defaults to the task's name)")
+	cmd.Flags().StringVar(&as, "as", "", "name for the new template (defaults to the job's name)")
 	return cmd
 }
 
-func addTemplateWizard(seed *config.Task) error {
+func addTemplateWizard(seed *config.Job) error {
 	r := newReader()
 	ask := makeAsk(r)
 	askMulti := makeAskMulti(r)
@@ -346,7 +346,7 @@ func appendTemplate(tmpl map[string]any) error {
 		if err := os.MkdirAll(paths.Root(), 0700); err != nil {
 			return err
 		}
-		if err := os.WriteFile(cfgPath, []byte("tasks: []\n"), 0600); err != nil {
+		if err := os.WriteFile(cfgPath, []byte("jobs: []\n"), 0600); err != nil {
 			return err
 		}
 	}
@@ -417,7 +417,7 @@ func removeTemplate(name string) error {
 	return nil
 }
 
-func saveTaskAsTemplate(taskName, tmplName string) error {
+func saveJobAsTemplate(jobName, tmplName string) error {
 	data, err := os.ReadFile(paths.Config())
 	if err != nil {
 		return err
@@ -426,20 +426,20 @@ func saveTaskAsTemplate(taskName, tmplName string) error {
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	tasks, _ := raw["tasks"].([]any)
+	jobs, _ := raw["jobs"].([]any)
 	var src map[string]any
-	for _, t := range tasks {
-		if m, ok := t.(map[string]any); ok && m["name"] == taskName {
+	for _, j := range jobs {
+		if m, ok := j.(map[string]any); ok && m["name"] == jobName {
 			src = m
 			break
 		}
 	}
 	if src == nil {
-		return fmt.Errorf("task %q not found", taskName)
+		return fmt.Errorf("job %q not found", jobName)
 	}
-	for _, t := range tasks {
-		if m, ok := t.(map[string]any); ok && m["name"] == tmplName {
-			return fmt.Errorf("a task named %q already exists; pass --as <name> to use a different template name", tmplName)
+	for _, j := range jobs {
+		if m, ok := j.(map[string]any); ok && m["name"] == tmplName {
+			return fmt.Errorf("a job named %q already exists; pass --as <name> to use a different template name", tmplName)
 		}
 	}
 
@@ -470,6 +470,6 @@ func saveTaskAsTemplate(taskName, tmplName string) error {
 	if err := os.WriteFile(paths.Config(), out, 0600); err != nil {
 		return err
 	}
-	fmt.Printf("saved task %q as template %q\n", taskName, tmplName)
+	fmt.Printf("saved job %q as template %q\n", jobName, tmplName)
 	return nil
 }

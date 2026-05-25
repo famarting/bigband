@@ -14,8 +14,10 @@ import (
 //
 //	~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl
 //
-// where the encoding replaces "/" and "." in the absolute path with "-".
-// This mirrors what the CLI itself does; it's how we know where to tail.
+// where the encoding replaces "/", "." and "_" in the absolute path with
+// "-". This mirrors what the CLI itself does; it's how we know where to
+// tail. Missing the "_" case caused empty job logs whenever a workspace
+// path contained an underscore (e.g. feature-worktrees/foo__bar).
 func claudeProjectDir(cwd string) (string, error) {
 	abs, err := filepath.Abs(cwd)
 	if err != nil {
@@ -25,7 +27,7 @@ func claudeProjectDir(cwd string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("home dir: %w", err)
 	}
-	encoded := strings.NewReplacer("/", "-", ".", "-").Replace(abs)
+	encoded := strings.NewReplacer("/", "-", ".", "-", "_", "-").Replace(abs)
 	return filepath.Join(home, ".claude", "projects", encoded), nil
 }
 

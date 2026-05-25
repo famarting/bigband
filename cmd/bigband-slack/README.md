@@ -6,7 +6,7 @@ It is a **separate process** from the bigband daemon and only talks to bigband t
 
 ## What it does
 
-- **Outbound mirror**: subscribes to `task_run.completed` events and posts the final assistant message into Slack channels you opted in to.
+- **Outbound mirror**: subscribes to `job_run.completed` events and posts the final assistant message into Slack channels you opted in to.
 - **Inbound triggers**: in channels you list, a message fires a one-off bigband run (`submit_run` IPC). The reply lands in a thread so you can follow up.
 - **Thread continuity**: replying in a thread runs `submit_run` with `parent_session_id`, resuming the same Claude session.
 
@@ -16,7 +16,7 @@ Empty config = does nothing. Mirror rules and trigger channels are explicitly op
 
 ```sh
 make install-slack                 # builds + copies to ~/bin/bigband-slack
-bigband-slack init                 # writes config.yaml + manifest.yaml under ~/.bigband-tasks/extensions/bigband-slack/
+bigband-slack init                 # writes config.yaml + manifest.yaml under ~/.bigband/extensions/bigband-slack/
 ```
 
 The bigband daemon discovers the manifest via fsnotify and supervises bigband-slack as a child process. You only need `bigband install` once for the whole system — there's no per-extension LaunchAgent any more.
@@ -68,7 +68,7 @@ printf '%s' "xapp-..." > ~/.config/bigband-slack/app_token && chmod 600 ~/.confi
 printf '%s' "xoxb-..." > ~/.config/bigband-slack/bot_token && chmod 600 ~/.config/bigband-slack/bot_token
 ```
 
-In `~/.bigband-tasks/extensions/bigband-slack/config.yaml`:
+In `~/.bigband/extensions/bigband-slack/config.yaml`:
 
 ```yaml
 slack:
@@ -87,7 +87,7 @@ bigband ext restart bigband-slack  # bounce after editing config or manifest
 
 ## Config
 
-`~/.bigband-tasks/extensions/bigband-slack/config.yaml`. Auto-reloaded on every save via `fsnotify`. Token / connection changes still require a full restart — the socket-mode session is bound at startup.
+`~/.bigband/extensions/bigband-slack/config.yaml`. Auto-reloaded on every save via `fsnotify`. Token / connection changes still require a full restart — the socket-mode session is bound at startup.
 
 ```yaml
 slack:
@@ -97,12 +97,12 @@ slack:
 
 # OUTBOUND. Empty list = nothing is mirrored. First match wins.
 mirror:
-  - task: morning-brief
+  - job: morning-brief
     channel: "#daily"
     open_thread: true                     # post final message as a new thread
     include_status: true                  # prefix "ok in 4m12s"
     on_failure: false                     # also post on non-success runs
-  - tasks: ["report-*", "alert-*"]        # simple glob: prefix-* or *-suffix
+  - jobs: ["report-*", "alert-*"]         # simple glob: prefix-* or *-suffix
     channel: "#reports"
 
 # INBOUND. Empty list = no Slack message ever fires a run.
@@ -112,9 +112,9 @@ trigger_channels:
     require_mention: true                 # only act on @app messages
     allow_freeform_prompt: true           # plain message → ephemeral submit_run
     commands:
-      - match: "^run (?P<task>\\S+)$"
-        action: run                       # bigband run <task>
-      - match: "^task (?P<name>\\S+):\\s*(?P<prompt>.+)"
+      - match: "^run (?P<job>\\S+)$"
+        action: run                       # bigband run <job>
+      - match: "^job (?P<name>\\S+):\\s*(?P<prompt>.+)"
         action: submit
 
 threads:
@@ -126,12 +126,12 @@ retention: 168h                           # drop store entries last touched > th
 
 ### Operator commands
 
-Mirror rules (outbound — task completion → Slack post):
+Mirror rules (outbound — job completion → Slack post):
 
 ```sh
 bigband-slack rules list                       # show mirror rules
-bigband-slack enable <task> --channel "#x" --thread
-bigband-slack disable <task>
+bigband-slack enable <job> --channel "#x" --thread
+bigband-slack disable <job>
 ```
 
 Trigger channels (inbound — Slack message → bigband run):
@@ -148,7 +148,7 @@ Diagnostic / debug:
 bigband ext list                               # supervisor view: status, pid, restarts
 bigband ext logs bigband-slack -f              # tail stdout/stderr
 bigband ext restart bigband-slack              # bounce
-bigband-slack mirror <task> [--dry-run]        # re-post the latest completion of a task (testing)
+bigband-slack mirror <job> [--dry-run]         # re-post the latest completion of a job (testing)
 ```
 
 Setup:

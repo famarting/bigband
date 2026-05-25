@@ -14,7 +14,7 @@ import (
 )
 
 // NewPruneCmd registers `bigband prune` — drops ephemeral one-off state
-// entries and their log directories. Configured tasks are never touched.
+// entries and their log directories. Configured jobs are never touched.
 //
 // When the daemon is running we route through `forget` IPC so the daemon's
 // in-memory map is updated too (otherwise it would clobber our edit on the
@@ -28,7 +28,7 @@ func NewPruneCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:     "prune",
-		Short:   "Remove ephemeral one-off task state and logs older than a cutoff",
+		Short:   "Remove ephemeral one-off job state and logs older than a cutoff",
 		GroupID: "config",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cutoffDur := 7 * 24 * time.Hour
@@ -48,8 +48,8 @@ func NewPruneCmd() *cobra.Command {
 			}
 			configured := map[string]bool{}
 			if cfg != nil {
-				for _, t := range cfg.Tasks {
-					configured[t.Name] = true
+				for _, j := range cfg.Jobs {
+					configured[j.Name] = true
 				}
 				for _, t := range cfg.Templates {
 					configured[t.Name] = true
@@ -59,28 +59,28 @@ func NewPruneCmd() *cobra.Command {
 			// Find candidates without mutating yet (so dry-run is honest).
 			// Snapshot Folder + WorktreePath here so we can clean up the
 			// worktree after the state row is removed (forget IPC and
-			// RemoveTask both drop the row without touching disk).
+			// RemoveJob both drop the row without touching disk).
 			type candidate struct {
 				name         string
 				folder       string
 				worktreePath string
 			}
 			var candidates []candidate
-			for name, ts := range st.Tasks {
-				if configured[name] || ts == nil || ts.RunningPID != 0 {
+			for name, js := range st.Jobs {
+				if configured[name] || js == nil || js.RunningPID != 0 {
 					continue
 				}
-				// Respect keep_worktree — owners (e.g. bigband-workflows) rely on
+				// Respect keep_worktree — owners rely on
 				// the worktree surviving past the run's completion. Skip auto-pruning
 				// these; they require an explicit `bigband rm`.
-				if ts.KeepWorktree && ts.WorktreePath != "" {
+				if js.KeepWorktree && js.WorktreePath != "" {
 					continue
 				}
-				if ts.LastRun == nil || ts.LastRun.Before(cutoff) {
+				if js.LastRun == nil || js.LastRun.Before(cutoff) {
 					candidates = append(candidates, candidate{
 						name:         name,
-						folder:       ts.Folder,
-						worktreePath: ts.WorktreePath,
+						folder:       js.Folder,
+						worktreePath: js.WorktreePath,
 					})
 				}
 			}
@@ -89,7 +89,7 @@ func NewPruneCmd() *cobra.Command {
 				return nil
 			}
 			if dryRun {
-				fmt.Printf("would prune %d ephemeral task(s) older than %s:\n", len(candidates), cutoff.Format(time.RFC3339))
+				fmt.Printf("would prune %d ephemeral job(s) older than %s:\n", len(candidates), cutoff.Format(time.RFC3339))
 				for _, c := range candidates {
 					if c.worktreePath != "" {
 						fmt.Printf("  %s (worktree %s)\n", c.name, c.worktreePath)
@@ -108,7 +108,7 @@ func NewPruneCmd() *cobra.Command {
 			pruned := 0
 			for _, c := range candidates {
 				if daemonUp {
-					reply, err := ipc.Send(ipc.Cmd{Action: "forget", Task: c.name})
+					reply, err := ipc.Send(ipc.Cmd{Action: "forget", Job: c.name})
 					if err != nil {
 						fmt.Printf("warning: forget %s: %v\n", c.name, err)
 						continue
@@ -118,13 +118,13 @@ func NewPruneCmd() *cobra.Command {
 						continue
 					}
 				} else {
-					if err := st.RemoveTask(c.name); err != nil {
+					if err := st.RemoveJob(c.name); err != nil {
 						fmt.Printf("warning: remove state %s: %v\n", c.name, err)
 						continue
 					}
 				}
 				if !keepLogs {
-					dir := paths.TaskLogDir(c.name)
+					dir := paths.JobLogDir(c.name)
 					if err := os.RemoveAll(dir); err != nil {
 						fmt.Printf("warning: remove logs %s: %v\n", dir, err)
 					}
@@ -134,7 +134,7 @@ func NewPruneCmd() *cobra.Command {
 				}
 				pruned++
 			}
-			fmt.Printf("pruned %d ephemeral task(s) (cutoff %s)\n", pruned, cutoff.Format(time.RFC3339))
+			fmt.Printf("pruned %d ephemeral job(s) (cutoff %s)\n", pruned, cutoff.Format(time.RFC3339))
 			return nil
 		},
 	}
@@ -144,10 +144,10 @@ func NewPruneCmd() *cobra.Command {
 	return cmd
 }
 
-// removeEphemeralWorktree deletes the worktree an ephemeral task owned. Only
-// invoked for ephemerals (configured tasks are filtered out upstream), and
+// removeEphemeralWorktree deletes the worktree an ephemeral job owned. Only
+// invoked for ephemerals (configured jobs are filtered out upstream), and
 // worktree.Remove guards against a stray path: it requires the basename to
-// match "<repo>-bb-<task>" and sit as a sibling of the repo root.
+// match "<repo>-bb-<job>" and sit as a sibling of the repo root.
 func removeEphemeralWorktree(name, folder, wtPath string) {
 	if folder == "" {
 		fmt.Printf("warning: cannot remove worktree %s for %s: no recorded folder\n", wtPath, name)

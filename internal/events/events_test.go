@@ -28,19 +28,19 @@ func TestPublishSubscribeRoundtrip(t *testing.T) {
 	defer cancel()
 
 	env := events.Envelope{
-		Type:     events.TypeTaskRunStarted,
-		TaskName: "my-task",
-		RunID:    "my-task/2024-01-01T00-00-00Z",
+		Type:    events.TypeJobRunStarted,
+		JobName: "my-job",
+		RunID:   "my-job/2024-01-01T00-00-00Z",
 	}
 	bus.Publish(env)
 
 	select {
 	case got := <-ch:
-		if got.Type != events.TypeTaskRunStarted {
-			t.Errorf("want type %s, got %s", events.TypeTaskRunStarted, got.Type)
+		if got.Type != events.TypeJobRunStarted {
+			t.Errorf("want type %s, got %s", events.TypeJobRunStarted, got.Type)
 		}
-		if got.TaskName != "my-task" {
-			t.Errorf("want task my-task, got %s", got.TaskName)
+		if got.JobName != "my-job" {
+			t.Errorf("want job my-job, got %s", got.JobName)
 		}
 		if got.EventID == "" {
 			t.Error("EventID should be auto-populated")
@@ -55,18 +55,18 @@ func TestPublishSubscribeRoundtrip(t *testing.T) {
 
 func TestSubscribeFilter_Type(t *testing.T) {
 	bus := newTestBus(t)
-	ch, cancel := bus.Subscribe(events.Filter{Types: []events.Type{events.TypeTaskRunCompleted}}, "filtered")
+	ch, cancel := bus.Subscribe(events.Filter{Types: []events.Type{events.TypeJobRunCompleted}}, "filtered")
 	defer cancel()
 
 	// Publish a non-matching event first.
-	bus.Publish(events.Envelope{Type: events.TypeClaudeSessionStarted, TaskName: "t1"})
+	bus.Publish(events.Envelope{Type: events.TypeClaudeSessionStarted, JobName: "t1"})
 	// Publish a matching event.
-	bus.Publish(events.Envelope{Type: events.TypeTaskRunCompleted, TaskName: "t2"})
+	bus.Publish(events.Envelope{Type: events.TypeJobRunCompleted, JobName: "t2"})
 
 	select {
 	case got := <-ch:
-		if got.Type != events.TypeTaskRunCompleted {
-			t.Errorf("want task_run.completed, got %s", got.Type)
+		if got.Type != events.TypeJobRunCompleted {
+			t.Errorf("want job_run.completed, got %s", got.Type)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for filtered event")
@@ -79,25 +79,25 @@ func TestSubscribeFilter_Type(t *testing.T) {
 	}
 }
 
-func TestSubscribeFilter_Task(t *testing.T) {
+func TestSubscribeFilter_Job(t *testing.T) {
 	bus := newTestBus(t)
-	ch, cancel := bus.Subscribe(events.Filter{Tasks: []string{"target-task"}}, "task-filtered")
+	ch, cancel := bus.Subscribe(events.Filter{Jobs: []string{"target-job"}}, "job-filtered")
 	defer cancel()
 
-	bus.Publish(events.Envelope{Type: events.TypeTaskRunStarted, TaskName: "other-task"})
-	bus.Publish(events.Envelope{Type: events.TypeTaskRunStarted, TaskName: "target-task"})
+	bus.Publish(events.Envelope{Type: events.TypeJobRunStarted, JobName: "other-job"})
+	bus.Publish(events.Envelope{Type: events.TypeJobRunStarted, JobName: "target-job"})
 
 	select {
 	case got := <-ch:
-		if got.TaskName != "target-task" {
-			t.Errorf("want target-task, got %s", got.TaskName)
+		if got.JobName != "target-job" {
+			t.Errorf("want target-job, got %s", got.JobName)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout")
 	}
 	select {
 	case extra := <-ch:
-		t.Errorf("unexpected event for task %s", extra.TaskName)
+		t.Errorf("unexpected event for job %s", extra.JobName)
 	default:
 	}
 }
@@ -109,7 +109,7 @@ func TestEventIDGeneration(t *testing.T) {
 
 	const n = 100
 	for i := 0; i < n; i++ {
-		bus.Publish(events.Envelope{Type: events.TypeTaskRunStarted})
+		bus.Publish(events.Envelope{Type: events.TypeJobRunStarted})
 	}
 
 	seen := make(map[string]bool, n)
@@ -135,7 +135,7 @@ func TestBusFileAppend(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		bus.Publish(events.Envelope{Type: events.TypeTaskRunStarted, TaskName: "task"})
+		bus.Publish(events.Envelope{Type: events.TypeJobRunStarted, JobName: "job"})
 	}
 	bus.Close()
 
@@ -173,7 +173,7 @@ func TestConcurrentPublish(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < eventsEach; j++ {
-				bus.Publish(events.Envelope{Type: events.TypeTaskRunStarted})
+				bus.Publish(events.Envelope{Type: events.TypeJobRunStarted})
 			}
 		}()
 	}
@@ -209,7 +209,7 @@ func TestBusClose_PublishNoPanic(t *testing.T) {
 	bus := newTestBus(t)
 	bus.Close()
 	// Should not panic.
-	bus.Publish(events.Envelope{Type: events.TypeTaskRunStarted})
+	bus.Publish(events.Envelope{Type: events.TypeJobRunStarted})
 }
 
 func TestLaggedSubscriberIsolation(t *testing.T) {
@@ -227,7 +227,7 @@ func TestLaggedSubscriberIsolation(t *testing.T) {
 	// the slow subscriber. Publishing 1100 events; slow never reads.
 	const n = 1100
 	for i := 0; i < n; i++ {
-		bus.Publish(events.Envelope{Type: events.TypeTaskRunStarted})
+		bus.Publish(events.Envelope{Type: events.TypeJobRunStarted})
 	}
 
 	// Fast subscriber should have received events (drain its buffer).

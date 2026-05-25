@@ -1,4 +1,4 @@
-// Package worktree manages git worktrees created for bigband task runs.
+// Package worktree manages git worktrees created for bigband job runs.
 package worktree
 
 import (
@@ -56,39 +56,39 @@ func OriginPath(folder string) (string, error) {
 	return primary, nil
 }
 
-// DefaultPath returns the conventional worktree path for a task:
-// a sibling of the repo root named <repo>-bb-<task>.
-func DefaultPath(repoRoot, taskName string) string {
+// DefaultPath returns the conventional worktree path for a job:
+// a sibling of the repo root named <repo>-bb-<job>.
+func DefaultPath(repoRoot, jobName string) string {
 	parent := filepath.Dir(repoRoot)
 	base := filepath.Base(repoRoot)
-	return filepath.Join(parent, base+"-bb-"+taskName)
+	return filepath.Join(parent, base+"-bb-"+jobName)
 }
 
-// SubDir returns the path inside wtPath that corresponds to taskFolder.
-// If taskFolder is the repo root itself, wtPath is returned unchanged.
-func SubDir(repoRoot, wtPath, taskFolder string) string {
-	rel, err := filepath.Rel(repoRoot, taskFolder)
+// SubDir returns the path inside wtPath that corresponds to jobFolder.
+// If jobFolder is the repo root itself, wtPath is returned unchanged.
+func SubDir(repoRoot, wtPath, jobFolder string) string {
+	rel, err := filepath.Rel(repoRoot, jobFolder)
 	if err != nil || rel == "." {
 		return wtPath
 	}
 	return filepath.Join(wtPath, rel)
 }
 
-// BranchName returns the git branch name bigband uses for a task worktree.
-func BranchName(taskName string) string {
-	return "bigband/" + taskName
+// BranchName returns the git branch name bigband uses for a job worktree.
+func BranchName(jobName string) string {
+	return "bigband/" + jobName
 }
 
 // CreateOrReplace creates a worktree at wtPath on a dedicated branch
-// bigband/<taskName> reset to HEAD. Any existing worktree or branch at that
+// bigband/<jobName> reset to HEAD. Any existing worktree or branch at that
 // name is removed first (stale from a crashed run).
-func CreateOrReplace(repoRoot, wtPath, taskName string, w io.Writer) error {
+func CreateOrReplace(repoRoot, wtPath, jobName string, w io.Writer) error {
 	// Clean up any stale worktree at this path.
 	if _, err := os.Stat(wtPath); err == nil {
 		_ = Remove(repoRoot, wtPath)
 	}
 	// Delete stale branch if it exists.
-	branch := BranchName(taskName)
+	branch := BranchName(jobName)
 	_ = exec.Command("git", "-C", repoRoot, "branch", "-D", branch).Run()
 
 	cmd := exec.Command("git", "-C", repoRoot, "worktree", "add", "-b", branch, wtPath, "HEAD")
@@ -131,27 +131,9 @@ func Remove(repoRoot, wtPath string) error {
 	return nil
 }
 
-// LooksLikeBigbandWorktree returns true when wtPath's basename matches the
-// bigband worktree naming convention (<something>-bb-<something>). Used by
-// fallback cleanup paths that can't construct the full guardWorktreePath
-// invariants (e.g., when the parent repo root is unresolvable). Strictly
-// weaker than guardWorktreePath but safe enough to refuse pathological
-// state.json values like "/" or "/Users/me".
-func LooksLikeBigbandWorktree(wtPath string) bool {
-	abs, err := filepath.Abs(wtPath)
-	if err != nil || abs == "/" || abs == "" {
-		return false
-	}
-	base := filepath.Base(abs)
-	if base == "." || base == "/" {
-		return false
-	}
-	return strings.Contains(base, "-bb-")
-}
-
 // guardWorktreePath returns nil only when wtPath is safe to recursively delete:
 // it must be a sibling of the repo root (where DefaultPath places it) and its
-// basename must follow the bigband naming convention (<repo>-bb-<task>). This
+// basename must follow the bigband naming convention (<repo>-bb-<job>). This
 // prevents a corrupted or hand-edited state.json from steering os.RemoveAll
 // at an unrelated directory.
 func guardWorktreePath(repoRoot, wtPath string) error {
@@ -170,7 +152,7 @@ func guardWorktreePath(repoRoot, wtPath string) error {
 	base := filepath.Base(abs)
 	repoBase := filepath.Base(rootAbs)
 	if !strings.HasPrefix(base, repoBase+"-bb-") {
-		return fmt.Errorf("path basename %q does not match bigband worktree convention (%s-bb-<task>)", base, repoBase)
+		return fmt.Errorf("path basename %q does not match bigband worktree convention (%s-bb-<job>)", base, repoBase)
 	}
 	if abs == "/" || abs == rootAbs || abs == expectedParent {
 		return fmt.Errorf("path %s is the root, the repo, or its parent — refusing", abs)

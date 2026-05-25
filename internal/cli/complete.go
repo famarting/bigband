@@ -7,28 +7,28 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// completeTaskNames is a ValidArgsFunction that completes configured task
+// completeJobNames is a ValidArgsFunction that completes configured job
 // names plus any ephemeral one-offs that exist in state. Ephemerals are
 // deduped against configured names.
-func completeTaskNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func completeJobNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) > 0 {
 		// Beyond the name position, fall through to default (file) completion
-		// so commands like `worktree move <task> <dest>` can complete paths.
+		// so commands like `worktree move <job> <dest>` can complete paths.
 		return nil, cobra.ShellCompDirectiveDefault
 	}
 	cfg, _ := config.LoadUnvalidated(paths.Config())
 	seen := map[string]bool{}
 	var names []string
 	if cfg != nil {
-		for _, t := range cfg.Tasks {
-			if !seen[t.Name] {
-				seen[t.Name] = true
-				names = append(names, t.Name)
+		for _, j := range cfg.Jobs {
+			if !seen[j.Name] {
+				seen[j.Name] = true
+				names = append(names, j.Name)
 			}
 		}
 	}
 	if st, err := state.Load(); err == nil {
-		for n := range st.Tasks {
+		for n := range st.Jobs {
 			if !seen[n] {
 				seen[n] = true
 				names = append(names, n)
@@ -38,10 +38,10 @@ func completeTaskNames(cmd *cobra.Command, args []string, toComplete string) ([]
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
-// completeConfiguredTaskNames completes only tasks that exist in config.yaml
+// completeConfiguredJobNames completes only jobs that exist in config.yaml
 // (i.e. excludes ephemeral state-only entries). Use for commands that operate
 // on config, such as edit, enable, and disable.
-func completeConfiguredTaskNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func completeConfiguredJobNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) > 0 {
 		return nil, cobra.ShellCompDirectiveDefault
 	}
@@ -49,9 +49,9 @@ func completeConfiguredTaskNames(cmd *cobra.Command, args []string, toComplete s
 	if cfg == nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	names := make([]string, 0, len(cfg.Tasks))
-	for _, t := range cfg.Tasks {
-		names = append(names, t.Name)
+	names := make([]string, 0, len(cfg.Jobs))
+	for _, j := range cfg.Jobs {
+		names = append(names, j.Name)
 	}
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
@@ -60,7 +60,7 @@ func completeConfiguredTaskNames(cmd *cobra.Command, args []string, toComplete s
 func completeTemplateNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) > 0 {
 		// Beyond the name position, fall through to default (file) completion
-		// so commands like `worktree move <task> <dest>` can complete paths.
+		// so commands like `worktree move <job> <dest>` can complete paths.
 		return nil, cobra.ShellCompDirectiveDefault
 	}
 	cfg, err := config.LoadUnvalidated(paths.Config())
@@ -74,20 +74,20 @@ func completeTemplateNames(cmd *cobra.Command, args []string, toComplete string)
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
-// completeTaskOrTemplateNames completes both task and template names.
-func completeTaskOrTemplateNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+// completeJobOrTemplateNames completes both job and template names.
+func completeJobOrTemplateNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) > 0 {
 		// Beyond the name position, fall through to default (file) completion
-		// so commands like `worktree move <task> <dest>` can complete paths.
+		// so commands like `worktree move <job> <dest>` can complete paths.
 		return nil, cobra.ShellCompDirectiveDefault
 	}
 	cfg, err := config.LoadUnvalidated(paths.Config())
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	names := make([]string, 0, len(cfg.Tasks)+len(cfg.Templates))
-	for _, t := range cfg.Tasks {
-		names = append(names, t.Name)
+	names := make([]string, 0, len(cfg.Jobs)+len(cfg.Templates))
+	for _, j := range cfg.Jobs {
+		names = append(names, j.Name)
 	}
 	for _, t := range cfg.Templates {
 		names = append(names, t.Name)

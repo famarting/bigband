@@ -12,16 +12,16 @@ import (
 )
 
 // Config is the bigband-slack configuration. Lives at
-// ~/.bigband-tasks/extensions/bigband-slack/config.yaml.
+// ~/.bigband/extensions/bigband-slack/config.yaml.
 //
-// Opt-in: an empty Mirror list means no task ever posts to Slack. Empty
+// Opt-in: an empty Mirror list means no job ever posts to Slack. Empty
 // TriggerChannels means no Slack message ever fires a bigband run.
 type Config struct {
 	Slack           SlackAuth        `yaml:"slack"`
 	Mirror          []MirrorRule     `yaml:"mirror,omitempty"`
 	TriggerChannels []TriggerChannel `yaml:"trigger_channels,omitempty"`
 	Threads         ThreadConfig     `yaml:"threads"`
-	// Retention is how long Run / Task / Thread mappings live in the local
+	// Retention is how long Run / Job / Thread mappings live in the local
 	// store after their last interaction. Default 168h (7 days). Zero
 	// disables auto-pruning.
 	Retention string `yaml:"retention,omitempty"`
@@ -60,29 +60,29 @@ func (s SlackAuth) ResolvedAppToken() string { return s.resolvedApp }
 // ResolvedBotToken returns the runtime bot token (after env:/file: resolution).
 func (s SlackAuth) ResolvedBotToken() string { return s.resolvedBot }
 
-// MirrorRule says "when a task run completes, post the final message to this
-// channel". Either Task (single name/glob) or Tasks (list) must be set.
+// MirrorRule says "when a job run completes, post the final message to this
+// channel". Either Job (single name/glob) or Jobs (list) must be set.
 // First matching rule wins. Set Enabled=false to opt out.
 type MirrorRule struct {
-	Task         string   `yaml:"task,omitempty"`
-	Tasks        []string `yaml:"tasks,omitempty"`
-	Channel      string   `yaml:"channel,omitempty"`
-	AllowReplies bool     `yaml:"allow_replies,omitempty"`
-	IncludeStatus bool    `yaml:"include_status,omitempty"`
-	OnFailure    bool     `yaml:"on_failure,omitempty"`
-	Enabled      *bool    `yaml:"enabled,omitempty"`
+	Job           string   `yaml:"job,omitempty"`
+	Jobs          []string `yaml:"jobs,omitempty"`
+	Channel       string   `yaml:"channel,omitempty"`
+	AllowReplies  bool     `yaml:"allow_replies,omitempty"`
+	IncludeStatus bool     `yaml:"include_status,omitempty"`
+	OnFailure     bool     `yaml:"on_failure,omitempty"`
+	Enabled       *bool    `yaml:"enabled,omitempty"`
 }
 
 // IsEnabled returns true when the rule is enabled (default true).
 func (r MirrorRule) IsEnabled() bool { return r.Enabled == nil || *r.Enabled }
 
-// Patterns returns the union of Task and Tasks, normalised.
+// Patterns returns the union of Job and Jobs, normalised.
 func (r MirrorRule) Patterns() []string {
 	var out []string
-	if r.Task != "" {
-		out = append(out, r.Task)
+	if r.Job != "" {
+		out = append(out, r.Job)
 	}
-	out = append(out, r.Tasks...)
+	out = append(out, r.Jobs...)
 	return out
 }
 
@@ -216,10 +216,10 @@ func resolveSecret(s string) (string, error) {
 	}
 }
 
-// MatchTask returns the first MirrorRule that matches name, honouring rule
+// MatchJob returns the first MirrorRule that matches name, honouring rule
 // order and the Enabled flag. Returns nil if no rule matches or the matching
 // rule is disabled (the latter is an explicit opt-out).
-func (c *Config) MatchTask(name string) *MirrorRule {
+func (c *Config) MatchJob(name string) *MirrorRule {
 	for i := range c.Mirror {
 		r := &c.Mirror[i]
 		for _, pat := range r.Patterns() {

@@ -12,11 +12,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newMirrorCmd registers `bigband-slack mirror <task>` — re-post the most
-// recent completed run of a task to Slack using the current config rules.
+// newMirrorCmd registers `bigband-slack mirror <job>` — re-post the most
+// recent completed run of a job to Slack using the current config rules.
 //
 // Useful for:
-//   - testing a freshly-added mirror rule without re-running the task
+//   - testing a freshly-added mirror rule without re-running the job
 //   - debugging "why didn't this post?" by re-running the same path with logs
 //   - replaying a missed completion when the integration was down at the time
 //
@@ -31,25 +31,25 @@ func newMirrorCmd() *cobra.Command {
 		dryRun  bool
 	)
 	cmd := &cobra.Command{
-		Use:   "mirror <task-name>",
-		Short: "Re-post a historical task completion to Slack (testing / debug)",
+		Use:   "mirror <job-name>",
+		Short: "Re-post a historical job completion to Slack (testing / debug)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			taskName := args[0]
+			jobName := args[0]
 			cfg, err := LoadConfig()
 			if err != nil {
 				return err
 			}
 
-			env, data, err := findCompletion(taskName, runID)
+			env, data, err := findCompletion(jobName, runID)
 			if err != nil {
 				return err
 			}
 
-			rule := cfg.MatchTask(taskName)
+			rule := cfg.MatchJob(jobName)
 			if rule == nil {
 				if channel == "" {
-					return fmt.Errorf("no mirror rule matches %q — pass --channel to override, or add a rule with `bigband-slack enable %s --channel ...`", taskName, taskName)
+					return fmt.Errorf("no mirror rule matches %q — pass --channel to override, or add a rule with `bigband-slack enable %s --channel ...`", jobName, jobName)
 				}
 				// No config rule matched; synthesise a minimal one so formatCompletion
 				// has sensible defaults. Only IncludeStatus is read by this code path —
@@ -64,7 +64,7 @@ func newMirrorCmd() *cobra.Command {
 				postChannel = cfg.Slack.DefaultChannel
 			}
 			if postChannel == "" {
-				return fmt.Errorf("no channel for task %q (no rule channel, no --channel, no default_channel)", taskName)
+				return fmt.Errorf("no channel for job %q (no rule channel, no --channel, no default_channel)", jobName)
 			}
 
 			// If the running daemon already linked this run to a thread, post
@@ -78,7 +78,7 @@ func newMirrorCmd() *cobra.Command {
 
 			text := formatCompletion(env, data, rule)
 
-			fmt.Printf("task:     %s\n", env.TaskName)
+			fmt.Printf("job:      %s\n", env.JobName)
 			fmt.Printf("run:      %s\n", env.RunID)
 			fmt.Printf("status:   %s\n", data.Status)
 			fmt.Printf("channel:  %s\n", postChannel)
@@ -115,20 +115,20 @@ func newMirrorCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&runID, "run-id", "", "specific run id (default: latest completion for the task)")
+	cmd.Flags().StringVar(&runID, "run-id", "", "specific run id (default: latest completion for the job)")
 	cmd.Flags().StringVar(&channel, "channel", "", "override the channel from the matched mirror rule")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be posted without calling Slack")
 	return cmd
 }
 
-// findCompletion scans events.jsonl for a task_run.completed envelope. When
+// findCompletion scans events.jsonl for a job_run.completed envelope. When
 // runID is empty, the most recent matching event wins. Order is the order
 // events were appended; we walk the whole file because individual entries
 // are tiny relative to typical events.jsonl sizes (retention bounds growth).
-func findCompletion(taskName, runID string) (bigbandext.Envelope, bigbandext.TaskRunCompletedData, error) {
+func findCompletion(jobName, runID string) (bigbandext.Envelope, bigbandext.JobRunCompletedData, error) {
 	f, err := os.Open(paths.EventsFile())
 	if err != nil {
-		return bigbandext.Envelope{}, bigbandext.TaskRunCompletedData{}, fmt.Errorf("open %s: %w", paths.EventsFile(), err)
+		return bigbandext.Envelope{}, bigbandext.JobRunCompletedData{}, fmt.Errorf("open %s: %w", paths.EventsFile(), err)
 	}
 	defer f.Close()
 	scanner := bufio.NewScanner(f)
@@ -139,10 +139,10 @@ func findCompletion(taskName, runID string) (bigbandext.Envelope, bigbandext.Tas
 		if err := json.Unmarshal(scanner.Bytes(), &env); err != nil {
 			continue
 		}
-		if env.Type != bigbandext.TypeTaskRunCompleted {
+		if env.Type != bigbandext.TypeJobRunCompleted {
 			continue
 		}
-		if env.TaskName != taskName {
+		if env.JobName != jobName {
 			continue
 		}
 		if runID != "" && env.RunID != runID {
@@ -155,17 +155,17 @@ func findCompletion(taskName, runID string) (bigbandext.Envelope, bigbandext.Tas
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return bigbandext.Envelope{}, bigbandext.TaskRunCompletedData{}, err
+		return bigbandext.Envelope{}, bigbandext.JobRunCompletedData{}, err
 	}
 	if latest == nil {
 		if runID != "" {
-			return bigbandext.Envelope{}, bigbandext.TaskRunCompletedData{}, fmt.Errorf("no task_run.completed found for task=%q run=%q", taskName, runID)
+			return bigbandext.Envelope{}, bigbandext.JobRunCompletedData{}, fmt.Errorf("no job_run.completed found for job=%q run=%q", jobName, runID)
 		}
-		return bigbandext.Envelope{}, bigbandext.TaskRunCompletedData{}, fmt.Errorf("no task_run.completed found for task=%q", taskName)
+		return bigbandext.Envelope{}, bigbandext.JobRunCompletedData{}, fmt.Errorf("no job_run.completed found for job=%q", jobName)
 	}
-	var data bigbandext.TaskRunCompletedData
+	var data bigbandext.JobRunCompletedData
 	if err := json.Unmarshal(latest.Data, &data); err != nil {
-		return bigbandext.Envelope{}, bigbandext.TaskRunCompletedData{}, fmt.Errorf("decode payload: %w", err)
+		return bigbandext.Envelope{}, bigbandext.JobRunCompletedData{}, fmt.Errorf("decode payload: %w", err)
 	}
 	return *latest, data, nil
 }

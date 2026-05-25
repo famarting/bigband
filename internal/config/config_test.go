@@ -15,8 +15,8 @@ defaults:
   shell: /bin/zsh
   timeout: 2h
 
-tasks:
-  - name: test-task
+jobs:
+  - name: test-job
     schedule: "Weekdays at ~20:00"
     folder: %s
     prompt: "Do something useful."
@@ -42,17 +42,17 @@ func TestLoadValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(cfg.Tasks) != 1 {
-		t.Fatalf("expected 1 task, got %d", len(cfg.Tasks))
+	if len(cfg.Jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(cfg.Jobs))
 	}
-	task := cfg.Tasks[0]
-	if task.Name != "test-task" {
-		t.Errorf("name: got %q", task.Name)
+	job := cfg.Jobs[0]
+	if job.Name != "test-job" {
+		t.Errorf("name: got %q", job.Name)
 	}
-	if task.CronExpr() != "0 20 * * 1-5" {
-		t.Errorf("cron: got %q", task.CronExpr())
+	if job.CronExpr() != "0 20 * * 1-5" {
+		t.Errorf("cron: got %q", job.CronExpr())
 	}
-	if task.JitterDuration() == 0 {
+	if job.JitterDuration() == 0 {
 		t.Error("expected jitter to be set")
 	}
 }
@@ -60,7 +60,7 @@ func TestLoadValid(t *testing.T) {
 func TestLoadDuplicateName(t *testing.T) {
 	tmp := t.TempDir()
 	path := writeConfig(t, `
-tasks:
+jobs:
   - name: foo
     schedule: "@daily"
     folder: `+tmp+`
@@ -85,8 +85,8 @@ templates:
     prompt: "Check CI"
     pre_exec: ["echo hi"]
 
-tasks:
-  - name: real-task
+jobs:
+  - name: real-job
     schedule: "@daily"
     folder: `+tmp+`
     prompt: "Do work"
@@ -102,17 +102,17 @@ tasks:
 	if cfg.TemplateByName("ci-check") == nil {
 		t.Error("TemplateByName(ci-check) returned nil")
 	}
-	got, kind := cfg.FindTaskOrTemplate("real-task")
-	if got == nil || kind != "task" {
-		t.Errorf("FindTaskOrTemplate(real-task) = %v, %q; want task", got, kind)
+	got, kind := cfg.FindJobOrTemplate("real-job")
+	if got == nil || kind != "job" {
+		t.Errorf("FindJobOrTemplate(real-job) = %v, %q; want job", got, kind)
 	}
-	got, kind = cfg.FindTaskOrTemplate("ci-check")
+	got, kind = cfg.FindJobOrTemplate("ci-check")
 	if got == nil || kind != "template" {
-		t.Errorf("FindTaskOrTemplate(ci-check) = %v, %q; want template", got, kind)
+		t.Errorf("FindJobOrTemplate(ci-check) = %v, %q; want template", got, kind)
 	}
 }
 
-func TestLoadTemplateNameCollidesWithTask(t *testing.T) {
+func TestLoadTemplateNameCollidesWithJob(t *testing.T) {
 	tmp := t.TempDir()
 	path := writeConfig(t, `
 templates:
@@ -120,7 +120,7 @@ templates:
     folder: `+tmp+`
     prompt: "x"
 
-tasks:
+jobs:
   - name: shared
     schedule: "@daily"
     folder: `+tmp+`
@@ -128,7 +128,7 @@ tasks:
 `)
 
 	if _, err := config.Load(path); err == nil {
-		t.Fatal("expected error for name collision between task and template")
+		t.Fatal("expected error for name collision between job and template")
 	}
 }
 
@@ -149,7 +149,7 @@ func TestSlugify(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"my custom task", "my-custom-task"},
+		{"my custom job", "my-custom-job"},
 		{"  Hello  World  ", "hello-world"},
 		{"Review Joni's Commit", "review-joni-s-commit"},
 		{"already-good_name", "already-good_name"},
@@ -167,8 +167,8 @@ func TestSlugify(t *testing.T) {
 }
 
 func TestIsValidName(t *testing.T) {
-	good := []string{"a", "abc", "a-b", "a_b", "task-1", "0task"}
-	bad := []string{"", "Abc", "a b", "-leading", "_leading", "ünicode", "task!"}
+	good := []string{"a", "abc", "a-b", "a_b", "job-1", "0job"}
+	bad := []string{"", "Abc", "a b", "-leading", "_leading", "ünicode", "job!"}
 	for _, s := range good {
 		if !config.IsValidName(s) {
 			t.Errorf("IsValidName(%q) = false; want true", s)
@@ -293,7 +293,7 @@ func realPath(t *testing.T, p string) string {
 func TestLoadMissingPrompt(t *testing.T) {
 	tmp := t.TempDir()
 	path := writeConfig(t, `
-tasks:
+jobs:
   - name: noprompt
     schedule: "@daily"
     folder: `+tmp+`

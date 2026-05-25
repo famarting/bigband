@@ -20,20 +20,20 @@ import (
 
 // SchemaVersion is the current envelope schema version. New event types bump
 // this; additive payload changes do not.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // Type is the closed enumeration of lifecycle event types. Authoritative list
 // is in docs/EVENTS.md.
 type Type string
 
 const (
-	TypeTaskRunStarted       Type = "task_run.started"
-	TypeTaskRunWorktreeReady Type = "task_run.worktree_ready"
+	TypeJobRunStarted        Type = "job_run.started"
+	TypeJobRunWorktreeReady  Type = "job_run.worktree_ready"
 	TypeClaudeSessionStarted Type = "claude.session_started"
 	TypeClaudeTurnCompleted  Type = "claude.turn_completed"
 	TypeClaudeWakeup         Type = "claude.scheduled_wakeup"
-	TypeTaskRunCompleted     Type = "task_run.completed"
-	TypeTaskRunPreFailed     Type = "task_run.failed_pre_exec"
+	TypeJobRunCompleted      Type = "job_run.completed"
+	TypeJobRunPreFailed      Type = "job_run.failed_pre_exec"
 	TypeSubscriberLagged     Type = "subscriber.lagged"
 
 	// Extension lifecycle events. The daemon emits these when supervising
@@ -43,7 +43,7 @@ const (
 	TypeExtensionFailed  Type = "extension.failed"
 
 	// TypeConfigReloaded is emitted by the daemon every time
-	// ~/.bigband-tasks/config.yaml is parsed successfully after an fsnotify
+	// ~/.bigband/config.yaml is parsed successfully after an fsnotify
 	// change. Extensions that maintain derived state (e.g. wake schedules,
 	// routing tables) subscribe to it to reconcile without polling. Payload:
 	// ConfigReloadedData.
@@ -69,7 +69,7 @@ type Envelope struct {
 	Type          Type            `json:"type"`
 	OccurredAt    time.Time       `json:"occurred_at"`
 	RunID         string          `json:"run_id,omitempty"`
-	TaskName      string          `json:"task_name,omitempty"`
+	JobName       string          `json:"job_name,omitempty"`
 	Source        Source          `json:"source,omitempty"`
 	TriggeredBy   string          `json:"triggered_by,omitempty"`
 	Data          json.RawMessage `json:"data,omitempty"`
@@ -88,11 +88,11 @@ type NopPublisher struct{}
 // Publish satisfies Publisher.
 func (NopPublisher) Publish(Envelope) {}
 
-// Filter narrows a subscription. Empty fields match everything; "*" in Tasks
+// Filter narrows a subscription. Empty fields match everything; "*" in Jobs
 // is also "all".
 type Filter struct {
 	Types []Type   `json:"types,omitempty"`
-	Tasks []string `json:"tasks,omitempty"`
+	Jobs  []string `json:"jobs,omitempty"`
 }
 
 // Match reports whether env passes the filter.
@@ -109,10 +109,10 @@ func (f Filter) Match(env Envelope) bool {
 			return false
 		}
 	}
-	if len(f.Tasks) > 0 {
+	if len(f.Jobs) > 0 {
 		ok := false
-		for _, n := range f.Tasks {
-			if n == "*" || n == env.TaskName {
+		for _, n := range f.Jobs {
+			if n == "*" || n == env.JobName {
 				ok = true
 				break
 			}

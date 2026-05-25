@@ -39,25 +39,25 @@ func main() {
 func newRoot() *cobra.Command {
 	root := &cobra.Command{
 		Use:     "bigband",
-		Short:   "Scheduled Claude Code task runner",
+		Short:   "Scheduled Claude Code job runner",
 		Version: resolveVersion(),
 		Long: `bigband schedules and runs Claude Code prompts on a cron schedule.
 
-Config lives at ~/.bigband-tasks/config.yaml
-Logs live at   ~/.bigband-tasks/logs/<task>/
+Config lives at ~/.bigband/config.yaml
+Logs live at   ~/.bigband/logs/<job>/
 
 Quick start:
-  bigband add              # add your first task
+  bigband add              # add your first job
   bigband install          # install as a launchd service (auto-starts on login)
-  bigband list             # list configured tasks and schedules
+  bigband list             # list configured jobs and schedules
   bigband status           # show recent execution history
-  bigband logs <task> -f   # tail a run`,
+  bigband logs <job> -f    # tail a run`,
 		SilenceUsage: true,
 	}
 
 	root.AddGroup(
 		&cobra.Group{ID: "daemon", Title: "Service:"},
-		&cobra.Group{ID: "tasks", Title: "Tasks:"},
+		&cobra.Group{ID: "jobs", Title: "Jobs:"},
 		&cobra.Group{ID: "run", Title: "Running:"},
 		&cobra.Group{ID: "config", Title: "Config:"},
 	)
@@ -70,8 +70,8 @@ Quick start:
 	}
 
 	addCmd("daemon", cli.NewDaemonCmd(), cli.NewInstallCmd(), cli.NewUninstallCmd(), cli.NewDaemonLogsCmd())
-	addCmd("tasks", cli.NewStatusCmd(), cli.NewListCmd(), cli.NewGetCmd(), cli.NewAddCmd(), cli.NewTemplateCmd(), cli.NewEditCmd(), cli.NewRmCmd(), cli.NewEnableCmd(), cli.NewDisableCmd(), cli.NewOpenCmd(), cli.NewWorktreeCmd())
-	addCmd("run", cli.NewRunCmd(), cli.NewSubmitCmd(), cli.NewFollowupCmd(), cli.NewStopCmd(), cli.NewLogsCmd(), cli.NewResumeCmd(), cli.NewEventsCmd(), cli.NewSubscribeCmd(), cli.NewSubscribersCmd(), cli.NewExtCmd())
+	addCmd("jobs", cli.NewStatusCmd(), cli.NewListCmd(), cli.NewGetCmd(), cli.NewAddCmd(), cli.NewTemplateCmd(), cli.NewEditCmd(), cli.NewRmCmd(), cli.NewEnableCmd(), cli.NewDisableCmd(), cli.NewOpenCmd(), cli.NewWorktreeCmd())
+	addCmd("run", cli.NewRunCmd(), cli.NewSubmitCmd(), cli.NewRerunCmd(), cli.NewFollowupCmd(), cli.NewStopCmd(), cli.NewLogsCmd(), cli.NewResumeCmd(), cli.NewEventsCmd(), cli.NewSubscribeCmd(), cli.NewSubscribersCmd(), cli.NewExtCmd())
 	addCmd("config", cli.NewValidateCmd(), cli.NewConfigCmd(), cli.NewPruneCmd())
 
 	return root

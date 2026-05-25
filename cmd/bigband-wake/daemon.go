@@ -25,8 +25,8 @@ import (
 const nextRunLayout = "2006-01-02 15:04:05"
 
 // reconcileDebounce is how long we wait after a triggering event before
-// running reconcile, so a burst of task_run.completed events for several
-// tasks coalesces into a single pmset reshuffle.
+// running reconcile, so a burst of job_run.completed events for several
+// jobs coalesces into a single pmset reshuffle.
 const reconcileDebounce = 500 * time.Millisecond
 
 func newDaemonCmd() *cobra.Command {
@@ -51,8 +51,8 @@ func newDaemonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			log.Printf("bigband-wake: config loaded enabled=%v lead=%s max_events=%d reconcile_every=%s",
-				cfg.Enabled, cfg.LeadDuration(), cfg.MaxEventsValue(), cfg.ReconcileEvery())
+			log.Printf("bigband-wake: config loaded enabled=%v lead=%s max_events=%d reconcile_every=%s assertion_hold=%s",
+				cfg.Enabled, cfg.LeadDuration(), cfg.MaxEventsValue(), cfg.ReconcileEvery(), cfg.AssertionHold())
 
 			if runtime.GOOS != "darwin" {
 				log.Printf("bigband-wake: %s is not supported (macOS only); idling so the supervisor doesn't restart-loop", runtime.GOOS)
@@ -93,6 +93,7 @@ func newDaemonCmd() *cobra.Command {
 				state:        st,
 				signal:       make(chan string, 8),
 				failureCount: make(map[string]int),
+				assertion:    newAssertionMgr("bigband-wake: keep awake after scheduled wake"),
 			}
 			r.cfg.Store(cfg)
 
@@ -106,9 +107,9 @@ func newDaemonCmd() *cobra.Command {
 			// Trigger 1: extension start → immediate reconcile.
 			r.kick("startup")
 
-			// Trigger 2 + 3: subscribe to the event bus for task_run.completed
-			// (next-fire-time for that task just rolled forward) and
-			// config.reloaded (tasks may have been added / removed / disabled).
+			// Trigger 2 + 3: subscribe to the event bus for job_run.completed
+			// (next-fire-time for that job just rolled forward) and
+			// config.reloaded (jobs may have been added / removed / disabled).
 			wg.Go(func() { r.runSubscribeLoop(ctx) })
 
 			// Trigger 4: safety-net periodic reconcile.
@@ -118,6 +119,13 @@ func newDaemonCmd() *cobra.Command {
 			// enabled toggles) without needing an extension restart.
 			wg.Go(func() { r.watchConfigFile(ctx) })
 
+			// Trigger 6: wake-from-sleep detection. Holds an IOPMAssertion
+			// for assertion_duration so the bigband daemon has time to fire
+			// its scheduled cron tick before macOS re-sleeps. This is the
+			// programmatic equivalent of `caffeinate -i` and the missing
+			// piece that pmset-only wakes don't give us on battery.
+			wg.Go(func() { r.runWakeDetector(ctx) })
+
 			<-ctx.Done()
 			log.Println("bigband-wake: stopping; cancelling owned pmset wakes")
 			// Shutdown reconcile: cancel everything we own. Use a fresh
@@ -126,6 +134,7 @@ func newDaemonCmd() *cobra.Command {
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			r.cancelAll(shutdownCtx)
+			r.assertion.releaseNow()
 			wg.Wait()
 			return nil
 		},
@@ -151,6 +160,7 @@ type reconciler struct {
 	state        *State
 	signal       chan string
 	failureCount map[string]int // wakeKey → consecutive cancel failure count
+	assertion    *assertionMgr  // holds an IOPMAssertion after detected wake-from-sleep
 }
 
 // kick requests a reconcile, tagged with a short reason for log lines.
@@ -195,6 +205,59 @@ func (r *reconciler) run(ctx context.Context) {
 			reason := pendingReason
 			pendingReason = ""
 			r.reconcileOnce(ctx, reason)
+		}
+	}
+}
+
+// wakeDetectInterval is how often runWakeDetector pings its own clock.
+// Short enough that we catch wakes within ~30s; long enough that the
+// daemon's idle CPU footprint stays trivial.
+const wakeDetectInterval = 30 * time.Second
+
+// wakeGapThreshold is the wall-clock gap between consecutive ticks that is
+// considered evidence of a sleep-then-wake transition. Set well above the
+// tick interval so normal scheduling jitter (GC pauses, App Nap, …) doesn't
+// falsely trigger an assertion hold.
+const wakeGapThreshold = 90 * time.Second
+
+// runWakeDetector watches for sleep-then-wake transitions by measuring the
+// wall-clock gap between consecutive ticks. Go's runtime timers pause while
+// macOS is in S3/standby, so an unexpectedly long gap is a near-perfect
+// signal that we just came back from sleep. On detection, hold an
+// IOPMAssertion for assertion_duration so the bigband daemon has time to
+// run its 05:20 (or whatever) cron tick before macOS goes back to sleep.
+//
+// We deliberately do NOT use IORegisterForSystemPower: that API requires a
+// CoreFoundation runloop pinned to a fixed OS thread, which is heavy from
+// Go. The heartbeat approach is uglier but reliable, and the cost of a
+// false-positive hold is just "laptop stays awake an extra 45 minutes."
+func (r *reconciler) runWakeDetector(ctx context.Context) {
+	last := time.Now()
+	t := time.NewTicker(wakeDetectInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			gap := now.Sub(last)
+			last = now
+			if gap < wakeGapThreshold {
+				continue
+			}
+			hold := r.cfg.Load().AssertionHold()
+			if hold <= 0 {
+				log.Printf("bigband-wake: detected wake-from-sleep (gap=%s) but assertion_duration=0; not holding",
+					gap.Round(time.Second))
+				continue
+			}
+			log.Printf("bigband-wake: detected wake-from-sleep (gap=%s); holding sleep assertion for %s",
+				gap.Round(time.Second), hold)
+			r.assertion.holdFor(hold)
+			// Nudge a reconcile so any owned wakes that just fired get
+			// re-derived from the daemon's current next_run before we
+			// might cancel-fail them.
+			r.kick("wake-detected")
 		}
 	}
 }
@@ -249,7 +312,7 @@ func (r *reconciler) streamOnce(ctx context.Context, lastSeen *time.Time, seen m
 	req := bigbandext.SubscribeRequest{
 		Name: "bigband-wake",
 		Types: []string{
-			string(bigbandext.TypeTaskRunCompleted),
+			string(bigbandext.TypeJobRunCompleted),
 			string(bigbandext.TypeConfigReloaded),
 		},
 	}
@@ -334,8 +397,8 @@ func (r *reconciler) watchConfigFile(ctx context.Context) {
 					return
 				}
 				r.cfg.Store(newCfg)
-				log.Printf("bigband-wake: config reloaded enabled=%v lead=%s max_events=%d",
-					newCfg.Enabled, newCfg.LeadDuration(), newCfg.MaxEventsValue())
+				log.Printf("bigband-wake: config reloaded enabled=%v lead=%s max_events=%d assertion_hold=%s",
+					newCfg.Enabled, newCfg.LeadDuration(), newCfg.MaxEventsValue(), newCfg.AssertionHold())
 				r.kick("config-edit")
 			})
 		case err, ok := <-w.Errors:
@@ -347,7 +410,7 @@ func (r *reconciler) watchConfigFile(ctx context.Context) {
 	}
 }
 
-// reconcileOnce derives the desired wake set from the daemon's current task
+// reconcileOnce derives the desired wake set from the daemon's current job
 // status, diffs against the persisted state, and applies the diff via pmset.
 // All pmset side-effects funnel through here.
 func (r *reconciler) reconcileOnce(ctx context.Context, reason string) {
@@ -367,15 +430,15 @@ func (r *reconciler) reconcileOnce(ctx context.Context, reason string) {
 		return
 	}
 
-	// Diff current vs desired by exact (task, wake_at) tuple. The exact time
+	// Diff current vs desired by exact (job, wake_at) tuple. The exact time
 	// is what pmset matches on, so any drift means "different event".
 	curByKey := make(map[string]WakeEvent, len(r.state.Events))
 	for _, e := range r.state.Events {
-		curByKey[wakeKey(e.Task, e.WakeAt)] = e
+		curByKey[wakeKey(e.Job, e.WakeAt)] = e
 	}
 	wantByKey := make(map[string]WakeEvent, len(desired))
 	for _, e := range desired {
-		wantByKey[wakeKey(e.Task, e.WakeAt)] = e
+		wantByKey[wakeKey(e.Job, e.WakeAt)] = e
 	}
 
 	var toCancel, toAdd []WakeEvent
@@ -405,17 +468,17 @@ func (r *reconciler) reconcileOnce(ctx context.Context, reason string) {
 	keep := make([]WakeEvent, 0, len(desired))
 	canceledKeys := make(map[string]struct{}, len(toCancel))
 	for _, e := range toCancel {
-		k := wakeKey(e.Task, e.WakeAt)
+		k := wakeKey(e.Job, e.WakeAt)
 		if err := cancelPmsetWake(ctx, e.WakeAt); err != nil {
 			r.failureCount[k]++
 			if r.failureCount[k] >= maxCancelFailures {
 				log.Printf("bigband-wake: CRITICAL cancel %s @ %s failed %d times; evicting from owned set",
-					e.Task, e.WakeAt.Local().Format(time.RFC3339), r.failureCount[k])
+					e.Job, e.WakeAt.Local().Format(time.RFC3339), r.failureCount[k])
 				canceledKeys[k] = struct{}{} // treat as removed so state is cleaned up
 				delete(r.failureCount, k)
 			} else {
 				log.Printf("bigband-wake: cancel %s @ %s failed (attempt %d/%d): %v",
-					e.Task, e.WakeAt.Local().Format(time.RFC3339), r.failureCount[k], maxCancelFailures, err)
+					e.Job, e.WakeAt.Local().Format(time.RFC3339), r.failureCount[k], maxCancelFailures, err)
 				keep = append(keep, e)
 			}
 			continue
@@ -424,7 +487,7 @@ func (r *reconciler) reconcileOnce(ctx context.Context, reason string) {
 		canceledKeys[k] = struct{}{}
 	}
 	for _, e := range r.state.Events {
-		if _, dropped := canceledKeys[wakeKey(e.Task, e.WakeAt)]; dropped {
+		if _, dropped := canceledKeys[wakeKey(e.Job, e.WakeAt)]; dropped {
 			continue
 		}
 		// Already kept above? skip — we only re-add cancel-failed entries.
@@ -432,14 +495,14 @@ func (r *reconciler) reconcileOnce(ctx context.Context, reason string) {
 			continue
 		}
 		// Was already-current AND wanted? keep it.
-		if _, wanted := wantByKey[wakeKey(e.Task, e.WakeAt)]; wanted {
+		if _, wanted := wantByKey[wakeKey(e.Job, e.WakeAt)]; wanted {
 			keep = append(keep, e)
 		}
 	}
 	for _, e := range toAdd {
 		if err := schedulePmsetWake(ctx, e.WakeAt); err != nil {
 			log.Printf("bigband-wake: schedule %s @ %s failed: %v",
-				e.Task, e.WakeAt.Local().Format(time.RFC3339), err)
+				e.Job, e.WakeAt.Local().Format(time.RFC3339), err)
 			continue
 		}
 		e.ScheduledAt = time.Now().Local()
@@ -453,9 +516,9 @@ func (r *reconciler) reconcileOnce(ctx context.Context, reason string) {
 	}
 }
 
-// desiredWakeSet asks the bigband daemon for current task status and derives
-// the set of wake events we'd like to own. Only enabled scheduled tasks with
-// a future next_run produce entries; one-off / disabled / done tasks are
+// desiredWakeSet asks the bigband daemon for current job status and derives
+// the set of wake events we'd like to own. Only enabled scheduled jobs with
+// a future next_run produce entries; one-off / disabled / done jobs are
 // skipped.
 func (r *reconciler) desiredWakeSet(ctx context.Context) ([]WakeEvent, error) {
 	_ = ctx // bigbandext.Client uses its own dial timeout; ctx reserved for future use.
@@ -466,19 +529,19 @@ func (r *reconciler) desiredWakeSet(ctx context.Context) ([]WakeEvent, error) {
 	cfg := r.cfg.Load()
 	now := time.Now()
 	lead := cfg.LeadDuration()
-	out := make([]WakeEvent, 0, len(st.Tasks))
-	for _, t := range st.Tasks {
-		if !t.Enabled || t.NextRun == "" {
+	out := make([]WakeEvent, 0, len(st.Jobs))
+	for _, j := range st.Jobs {
+		if !j.Enabled || j.NextRun == "" {
 			continue
 		}
-		// Filter pseudo-states emitted for one-off / disabled tasks.
-		switch t.NextRun {
+		// Filter pseudo-states emitted for one-off / disabled jobs.
+		switch j.NextRun {
 		case "disabled", "pending", "done", "running":
 			continue
 		}
-		fire, err := time.ParseInLocation(nextRunLayout, t.NextRun, time.Local)
+		fire, err := time.ParseInLocation(nextRunLayout, j.NextRun, time.Local)
 		if err != nil {
-			log.Printf("bigband-wake: ignoring task %q with unparseable next_run %q: %v", t.Name, t.NextRun, err)
+			log.Printf("bigband-wake: ignoring job %q with unparseable next_run %q: %v", j.Name, j.NextRun, err)
 			continue
 		}
 		wakeAt := fire.Add(-lead)
@@ -488,7 +551,7 @@ func (r *reconciler) desiredWakeSet(ctx context.Context) ([]WakeEvent, error) {
 			continue
 		}
 		out = append(out, WakeEvent{
-			Task:   t.Name,
+			Job:    j.Name,
 			WakeAt: wakeAt,
 			FireAt: fire,
 		})
@@ -510,7 +573,7 @@ func (r *reconciler) cancelAll(ctx context.Context) {
 	for _, e := range r.state.Events {
 		if err := cancelPmsetWake(ctx, e.WakeAt); err != nil {
 			log.Printf("bigband-wake: cancelAll: %s @ %s failed: %v",
-				e.Task, e.WakeAt.Local().Format(time.RFC3339), err)
+				e.Job, e.WakeAt.Local().Format(time.RFC3339), err)
 			remaining = append(remaining, e)
 		}
 	}
@@ -520,16 +583,16 @@ func (r *reconciler) cancelAll(ctx context.Context) {
 	}
 }
 
-// wakeKey identifies a wake entry for diffing. The (task, wake_at) tuple is
-// what we own; pmset itself only knows the time, but we track the task too
+// wakeKey identifies a wake entry for diffing. The (job, wake_at) tuple is
+// what we own; pmset itself only knows the time, but we track the job too
 // so re-add after cancel-failed retries doesn't double up.
-func wakeKey(task string, wakeAt time.Time) string {
-	return task + "|" + wakeAt.UTC().Format(time.RFC3339Nano)
+func wakeKey(job string, wakeAt time.Time) string {
+	return job + "|" + wakeAt.UTC().Format(time.RFC3339Nano)
 }
 
 func contains(events []WakeEvent, target WakeEvent) bool {
 	for _, e := range events {
-		if e.Task == target.Task && e.WakeAt.Equal(target.WakeAt) {
+		if e.Job == target.Job && e.WakeAt.Equal(target.WakeAt) {
 			return true
 		}
 	}

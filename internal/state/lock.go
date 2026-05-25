@@ -7,13 +7,13 @@ import (
 	"github.com/famarting/bigband/internal/paths"
 )
 
-// Lock tries to acquire an exclusive flock on the task's lock file.
+// Lock tries to acquire an exclusive flock on the job's lock file.
 // Returns a release function and true if successful; false if already locked.
-func Lock(taskName string) (release func(), acquired bool) {
+func Lock(jobName string) (release func(), acquired bool) {
 	if err := os.MkdirAll(paths.StateDir(), 0700); err != nil {
 		return nil, false
 	}
-	path := paths.TaskLockFile(taskName)
+	path := paths.JobLockFile(jobName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, false

@@ -18,68 +18,149 @@ func NewListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
-		Short:   "List configured tasks with their schedule and next run",
+		Short:   "List configured jobs with their schedule and next run",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			all, _ := cmd.Flags().GetBool("all")
+			asJSON, _ := cmd.Flags().GetBool("json")
 			reply, err := ipc.Send(ipc.Cmd{Action: "status"})
 			if err == nil && reply.OK {
-				return printTaskList(reply, all)
+				if asJSON {
+					return printJobListJSON(reply, all)
+				}
+				return printJobList(reply, all)
 			}
-			fmt.Fprintln(os.Stderr, "daemon not running — next-run times unavailable")
-			return printOfflineTaskList(all)
+			if !asJSON {
+				fmt.Fprintln(os.Stderr, "daemon not running — next-run times unavailable")
+			}
+			if asJSON {
+				return printOfflineJobListJSON(all)
+			}
+			return printOfflineJobList(all)
 		},
 	}
-	cmd.Flags().Bool("all", false, "include ephemeral (one-off submitted) tasks")
+	cmd.Flags().Bool("all", false, "include ephemeral (one-off submitted) jobs")
+	cmd.Flags().Bool("json", false, "emit jobs as JSON (for scripting / fws integration)")
 	return cmd
 }
 
-func printTaskList(reply *ipc.Reply, all bool) error {
+func printJobListJSON(reply *ipc.Reply, all bool) error {
+	var payload ipc.StatusPayload
+	if err := json.Unmarshal(reply.Payload, &payload); err != nil {
+		return err
+	}
+	out := make([]ipc.JobStatus, 0, len(payload.Jobs))
+	for _, j := range payload.Jobs {
+		if j.Ephemeral && !all {
+			continue
+		}
+		out = append(out, j)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+func printOfflineJobListJSON(all bool) error {
+	cfg, err := config.Load(paths.Config())
+	if err != nil {
+		return err
+	}
+	st, _ := state.Load()
+
+	type entry struct {
+		Name         string `json:"name"`
+		Schedule     string `json:"schedule"`
+		Enabled      bool   `json:"enabled"`
+		Folder       string `json:"folder"`
+		WorktreePath string `json:"worktree_path,omitempty"`
+		WorktreeMode string `json:"worktree_mode,omitempty"`
+		Ephemeral    bool   `json:"ephemeral,omitempty"`
+	}
+
+	out := make([]entry, 0, len(cfg.Jobs))
+	seen := map[string]bool{}
+	for _, j := range cfg.Jobs {
+		seen[j.Name] = true
+		js := st.Get(j.Name)
+		out = append(out, entry{
+			Name:         j.Name,
+			Schedule:     j.Schedule,
+			Enabled:      j.IsEnabled(),
+			Folder:       j.Folder,
+			WorktreePath: js.WorktreePath,
+			WorktreeMode: j.WorktreeMode(),
+		})
+	}
+	if all {
+		for name, js := range st.Jobs {
+			if seen[name] {
+				continue
+			}
+			if js.LastRun == nil {
+				continue
+			}
+			out = append(out, entry{
+				Name:      name,
+				Enabled:   true,
+				Folder:    js.Folder,
+				Ephemeral: true,
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
+func printJobList(reply *ipc.Reply, all bool) error {
 	var payload ipc.StatusPayload
 	if err := json.Unmarshal(reply.Payload, &payload); err != nil {
 		return err
 	}
 
 	// Partition: scheduled → one-off configured → ephemerals.
-	var scheduled, oneOff, ephemerals []ipc.TaskStatus
-	for _, t := range payload.Tasks {
+	var scheduled, oneOff, ephemerals []ipc.JobStatus
+	for _, j := range payload.Jobs {
 		switch {
-		case t.Ephemeral:
-			ephemerals = append(ephemerals, t)
-		case t.Schedule != "":
-			scheduled = append(scheduled, t)
+		case j.Ephemeral:
+			ephemerals = append(ephemerals, j)
+		case j.Schedule != "":
+			scheduled = append(scheduled, j)
 		default:
-			oneOff = append(oneOff, t)
+			oneOff = append(oneOff, j)
 		}
 	}
 	sort.Slice(scheduled, func(i, j int) bool { return scheduled[i].Name < scheduled[j].Name })
 	sort.Slice(oneOff, func(i, j int) bool { return oneOff[i].Name < oneOff[j].Name })
 	sort.Slice(ephemerals, func(i, j int) bool { return ephemerals[i].Name < ephemerals[j].Name })
 
-	tasks := append(scheduled, oneOff...)
+	jobs := append(scheduled, oneOff...)
 	if all {
-		tasks = append(tasks, ephemerals...)
+		jobs = append(jobs, ephemerals...)
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN\tRUN DIR")
-	for _, t := range tasks {
-		sched := t.Schedule
+	for _, j := range jobs {
+		sched := j.Schedule
 		if sched == "" {
 			sched = "one-off"
 		}
 		enabled := "yes"
-		if !t.Enabled {
+		if !j.Enabled {
 			enabled = "no"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", t.Name, sched, enabled, t.NextRun, runDir(t.WorktreePath, t.Folder, t.WorktreeMode))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", j.Name, sched, enabled, j.NextRun, runDir(j.WorktreePath, j.Folder, j.WorktreeMode))
 	}
 	return w.Flush()
 }
 
 // runDir picks the directory to display alongside the worktree mode: the
-// active worktree path if recorded, otherwise the configured task folder. The
+// active worktree path if recorded, otherwise the configured job folder. The
 // mode (when non-empty) is appended in parentheses so the reader can tell at a
-// glance whether the task uses a worktree and how it manages it.
+// glance whether the job uses a worktree and how it manages it.
 func runDir(worktreePath, folder, mode string) string {
 	dir := worktreePath
 	if dir == "" {
@@ -94,7 +175,7 @@ func runDir(worktreePath, folder, mode string) string {
 	return dir
 }
 
-func printOfflineTaskList(all bool) error {
+func printOfflineJobList(all bool) error {
 	cfg, err := config.Load(paths.Config())
 	if err != nil {
 		return err
@@ -105,25 +186,25 @@ func printOfflineTaskList(all bool) error {
 
 	var scheduled, oneOff []row
 	seen := map[string]bool{}
-	for _, t := range cfg.Tasks {
-		seen[t.Name] = true
+	for _, j := range cfg.Jobs {
+		seen[j.Name] = true
 		enabled := "yes"
-		if !t.IsEnabled() {
+		if !j.IsEnabled() {
 			enabled = "no"
 		}
-		sched := t.Schedule
+		sched := j.Schedule
 		nextRun := "-"
-		ts := st.Get(t.Name)
-		if t.IsOneOff() {
+		js := st.Get(j.Name)
+		if j.IsOneOff() {
 			sched = "one-off"
-			if ts.LastRun == nil {
+			if js.LastRun == nil {
 				nextRun = "pending"
 			} else {
 				nextRun = "done"
 			}
 		}
-		r := row{t.Name, sched, enabled, nextRun, runDir(ts.WorktreePath, t.Folder, t.WorktreeMode())}
-		if t.IsOneOff() {
+		r := row{j.Name, sched, enabled, nextRun, runDir(js.WorktreePath, j.Folder, j.WorktreeMode())}
+		if j.IsOneOff() {
 			oneOff = append(oneOff, r)
 		} else {
 			scheduled = append(scheduled, r)
@@ -134,7 +215,7 @@ func printOfflineTaskList(all bool) error {
 
 	// Collect ephemeral submissions (state-only entries not in config.yaml).
 	var ephemeralNames []string
-	for name := range st.Tasks {
+	for name := range st.Jobs {
 		if !seen[name] {
 			ephemeralNames = append(ephemeralNames, name)
 		}
@@ -142,15 +223,15 @@ func printOfflineTaskList(all bool) error {
 	sort.Strings(ephemeralNames)
 	var ephemerals []row
 	for _, name := range ephemeralNames {
-		ts := st.Get(name)
-		if ts.LastRun == nil {
+		js := st.Get(name)
+		if js.LastRun == nil {
 			continue
 		}
 		nextRun := "done"
-		if ts.LastStatus == state.StatusRunning {
+		if js.LastStatus == state.StatusRunning {
 			nextRun = "running"
 		}
-		ephemerals = append(ephemerals, row{name, "one-off", "yes", nextRun, runDir(ts.WorktreePath, ts.Folder, "")})
+		ephemerals = append(ephemerals, row{name, "one-off", "yes", nextRun, runDir(js.WorktreePath, js.Folder, "")})
 	}
 
 	rows := append(scheduled, oneOff...)

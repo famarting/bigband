@@ -1,6 +1,6 @@
 # Build your first bigband integration
 
-This is a 30-minute walkthrough that takes you from "empty Go file" to a working bigband integration. The result will be a small webhook poster: every time a bigband task finishes, your program receives the event and POSTs Claude's final assistant message to an HTTP endpoint of your choice.
+This is a 30-minute walkthrough that takes you from "empty Go file" to a working bigband integration. The result will be a small webhook poster: every time a bigband job finishes, your program receives the event and POSTs Claude's final assistant message to an HTTP endpoint of your choice.
 
 The tutorial uses the [`pkg/bigbandext`](../pkg/bigbandext) public Go SDK. The same shape works in any language — the `examples/extensions/echo-handler/` example is stdlib-only Go, and the protocol (one JSON object per line over a Unix socket) is trivial to reach from Python, Node, or shell.
 
@@ -12,7 +12,7 @@ If you only need bullet-point reference, read [`EXTENDING.md`](../EXTENDING.md) 
 
 - Bigband installed and running (`bigband daemon-logs -f` shows a heartbeat).
 - A Go 1.26+ toolchain (matches bigband's go.mod).
-- One scheduled or one-off bigband task you can trigger to generate events. If you don't have one, run any quick task (`bigband submit --folder . --prompt "say hi"`).
+- One scheduled or one-off bigband job you can trigger to generate events. If you don't have one, run any quick job (`bigband submit --folder . --prompt "say hi"`).
 
 ## 0. New module
 
@@ -54,11 +54,11 @@ func main() {
 }
 ```
 
-`NewClientFromEnv` honours `$BIGBAND_HOME`; otherwise it falls back to `~/.bigband-tasks`. Run it:
+`NewClientFromEnv` honours `$BIGBAND_HOME`; otherwise it falls back to `~/.bigband`. Run it:
 
 ```sh
 go run .
-# connected to /Users/you/.bigband-tasks/daemon.sock
+# connected to /Users/you/.bigband/daemon.sock
 ```
 
 If `Ping` fails, the daemon isn't running. `bigband install` (or `bigband daemon` foreground) and try again.
@@ -73,7 +73,7 @@ defer cancel()
 
 events, errs := client.Subscribe(ctx, bigbandext.SubscribeRequest{
 	Name:  "bigband-webhook",
-	Types: []string{string(bigbandext.TypeTaskRunCompleted)},
+	Types: []string{string(bigbandext.TypeJobRunCompleted)},
 })
 
 for {
@@ -82,7 +82,7 @@ for {
 		if !ok {
 			return
 		}
-		fmt.Printf("[%s] %s — run %s\n", env.Type, env.TaskName, env.RunID)
+		fmt.Printf("[%s] %s — run %s\n", env.Type, env.JobName, env.RunID)
 	case err := <-errs:
 		log.Println("subscribe error:", err)
 		return
@@ -94,14 +94,14 @@ for {
 
 (You'll need `os/signal`, `os`, `syscall` imports.)
 
-Trigger a bigband task in another terminal — `bigband run <some-task>` — and watch the line print. **The contract is real**: you're now consuming the same stream the bundled `bigband-slack` does.
+Trigger a bigband job in another terminal — `bigband run <some-job>` — and watch the line print. **The contract is real**: you're now consuming the same stream the bundled `bigband-slack` does.
 
 Confirm the daemon sees you:
 
 ```sh
 bigband subscribers
-# NAME              CONNECTED FOR  TYPES                 TASKS  LAG DROPPED
-# bigband-webhook   12s            task_run.completed    *      0
+# NAME              CONNECTED FOR  TYPES                 JOBS  LAG DROPPED
+# bigband-webhook   12s            job_run.completed    *      0
 ```
 
 ## 3. Decode the payload
@@ -109,7 +109,7 @@ bigband subscribers
 `Envelope.Data` is `json.RawMessage`. Decode into the typed payload for the type you matched:
 
 ```go
-var d bigbandext.TaskRunCompletedData
+var d bigbandext.JobRunCompletedData
 if err := json.Unmarshal(env.Data, &d); err != nil {
 	log.Println("bad envelope:", err)
 	continue
@@ -125,7 +125,7 @@ Add an HTTP client. Wrap the inner block:
 
 ```go
 type post struct {
-	Task    string `json:"task"`
+	Job     string `json:"job"`
 	Status  string `json:"status"`
 	Message string `json:"message"`
 	RunID   string `json:"run_id"`
@@ -135,7 +135,7 @@ if d.Status != "ok" {
 	continue // skip failures, or include them — your call
 }
 body, _ := json.Marshal(post{
-	Task:    env.TaskName,
+	Job:     env.JobName,
 	Status:  d.Status,
 	Message: d.FinalMessage,
 	RunID:   env.RunID,
@@ -148,19 +148,19 @@ if err != nil {
 resp.Body.Close()
 ```
 
-That's a working integration in ~50 lines. Trigger another task and the webhook fires.
+That's a working integration in ~50 lines. Trigger another job and the webhook fires.
 
 ## 5. Survive restarts (replay)
 
 If your program is down when an event fires, you miss it. Fix this in two lines:
 
 ```go
-// Persist last-seen timestamp to ~/.bigband-tasks/extensions/bigband-webhook/last_seen
+// Persist last-seen timestamp to ~/.bigband/extensions/bigband-webhook/last_seen
 since := readLastSeen() // your impl; RFC3339 string from disk
 
 events, errs := client.Subscribe(ctx, bigbandext.SubscribeRequest{
 	Name:  "bigband-webhook",
-	Types: []string{string(bigbandext.TypeTaskRunCompleted)},
+	Types: []string{string(bigbandext.TypeJobRunCompleted)},
 	Since: since,
 })
 ```
@@ -171,7 +171,7 @@ Persist `env.OccurredAt` after every successful POST and you'll never lose an ev
 
 ## 6. Trigger bigband from your integration
 
-Subscribing is half the story. The other half is firing tasks based on what your integration sees:
+Subscribing is half the story. The other half is firing jobs based on what your integration sees:
 
 ```go
 // One-off run
@@ -180,7 +180,7 @@ reply, err := client.Submit(bigbandext.SubmitRunRequest{
 	Prompt:    "say hi",
 	Ephemeral: true,
 })
-// → reply.RunID, reply.TaskName
+// → reply.RunID, reply.JobName
 
 // Follow-up: resume a previous Claude session in its worktree
 reply, err = client.Followup(prevSessionID, prevWorktreePath, "now do X")
@@ -188,14 +188,14 @@ reply, err = client.Followup(prevSessionID, prevWorktreePath, "now do X")
 
 `Followup` is sugar for `Submit` with `parent_session_id` set and `worktree: false` (so the runner doesn't try to create a fresh worktree on resume). The Slack integration uses this exact call to turn thread replies into resumed Claude sessions.
 
-Other operations: `client.Run("task")`, `client.Stop("task")`, `client.Status()`, `client.Forget("oneoff-...")`.
+Other operations: `client.Run("job")`, `client.Stop("job")`, `client.Status()`, `client.Forget("oneoff-...")`.
 
 ## Where to live
 
-By convention, integrations keep their config and state under `~/.bigband-tasks/extensions/<name>/`. Bigband core ignores it — the directory is yours.
+By convention, integrations keep their config and state under `~/.bigband/extensions/<name>/`. Bigband core ignores it — the directory is yours.
 
 ```
-~/.bigband-tasks/extensions/bigband-webhook/
+~/.bigband/extensions/bigband-webhook/
 ├── config.yaml          # your config
 ├── last_seen            # for replay
 └── ...

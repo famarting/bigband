@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -20,11 +21,11 @@ var folderOriginResolver = worktree.OriginPath
 
 var validName = regexp.MustCompile(`^[a-z0-9][a-z0-9\-_]*$`)
 
-// IsValidName reports whether s is a syntactically valid task or template name.
+// IsValidName reports whether s is a syntactically valid job or template name.
 func IsValidName(s string) bool { return validName.MatchString(s) }
 
 // Slugify returns a best-effort lowercase, dash-separated form of s suitable
-// for use as a task name. Returns the empty string if no valid characters
+// for use as a job name. Returns the empty string if no valid characters
 // remain.
 func Slugify(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
@@ -52,8 +53,8 @@ func Slugify(s string) string {
 // Config is the top-level config file structure.
 type Config struct {
 	Defaults  Defaults `yaml:"defaults"`
-	Templates []*Task  `yaml:"templates,omitempty"`
-	Tasks     []*Task  `yaml:"tasks"`
+	Templates []*Job   `yaml:"templates,omitempty"`
+	Jobs      []*Job   `yaml:"jobs"`
 }
 
 // Defaults holds cluster-level defaults.
@@ -64,26 +65,26 @@ type Defaults struct {
 	Jitter     Duration `yaml:"jitter"`
 	Model      string   `yaml:"model"`
 	Effort     string   `yaml:"effort"`
-	// Agent selects the default agent provider for tasks that don't set one
+	// Agent selects the default agent provider for jobs that don't set one
 	// explicitly. Empty falls back to DefaultAgent ("claude").
 	Agent   string   `yaml:"agent,omitempty"`
 	Folder  string   `yaml:"folder"`
 	PreExec []string `yaml:"pre_exec"`
-	// EphemeralRetention is how long IPC-submitted one-off task entries
+	// EphemeralRetention is how long IPC-submitted one-off job entries
 	// (state + log dirs) are kept after their last run. Zero or unset
-	// disables auto-pruning. Configured tasks (those in tasks:) are never
+	// disables auto-pruning. Configured jobs (those in jobs:) are never
 	// touched. Default: 168h (7 days).
 	EphemeralRetention Duration `yaml:"ephemeral_retention"`
-	// AllowedFolders, when non-empty, restricts which directories tasks may
-	// run in. Each entry is a directory; a task's folder is permitted when its
+	// AllowedFolders, when non-empty, restricts which directories jobs may
+	// run in. Each entry is a directory; a job's folder is permitted when its
 	// resolved primary working tree (i.e. the source-of-truth repo even when
 	// running inside a linked worktree) is equal to or a descendant of one of
 	// these entries. Empty list means no restriction (default).
 	AllowedFolders []string `yaml:"allowed_folders,omitempty"`
 }
 
-// Task is a single scheduled Claude Code job.
-type Task struct {
+// Job is a single scheduled Claude Code job.
+type Job struct {
 	Name             string    `yaml:"name"`
 	Schedule         string    `yaml:"schedule"`
 	Folder           string    `yaml:"folder"`
@@ -98,7 +99,7 @@ type Task struct {
 	Jitter           *Duration `yaml:"jitter"`
 	Model            string    `yaml:"model"`
 	Effort           string    `yaml:"effort"`
-	// Agent selects the agent provider for this task. Empty falls back to
+	// Agent selects the agent provider for this job. Empty falls back to
 	// Defaults.Agent and then to DefaultAgent ("claude").
 	Agent            string   `yaml:"agent,omitempty"`
 	ExtraClaudeFlags []string `yaml:"extra_claude_flags"`
@@ -112,7 +113,7 @@ type Task struct {
 	// ResumeSessionID, when non-empty, makes the runner pass --resume <id> to
 	// the first claude invocation. Set by IPC submit for follow-ups.
 	ResumeSessionID string `yaml:"-"`
-	// Ephemeral marks a task that was constructed in-memory (e.g. via IPC
+	// Ephemeral marks a job that was constructed in-memory (e.g. via IPC
 	// submit) and must never be written back to config.yaml.
 	Ephemeral bool `yaml:"-"`
 	// TriggeredBy is a free-form label describing what caused this run
@@ -125,15 +126,15 @@ type Task struct {
 	RunTimestamp string `yaml:"-"`
 }
 
-// IsOneOff returns true when the task has no schedule and fires exactly once.
-func (t *Task) IsOneOff() bool { return t.Schedule == "" }
+// IsOneOff returns true when the job has no schedule and fires exactly once.
+func (j *Job) IsOneOff() bool { return j.Schedule == "" }
 
-// ShouldUseWorktree returns true when the task should run inside a git
+// ShouldUseWorktree returns true when the job should run inside a git
 // worktree. Defaults to true for backwards compatibility — set worktree: false
-// to run directly inside task.Folder instead.
-func (t *Task) ShouldUseWorktree() bool {
-	if t.Worktree != nil {
-		return *t.Worktree
+// to run directly inside job.Folder instead.
+func (j *Job) ShouldUseWorktree() bool {
+	if j.Worktree != nil {
+		return *j.Worktree
 	}
 	return true
 }
@@ -144,54 +145,54 @@ func (t *Task) ShouldUseWorktree() bool {
 // snapshot of HEAD. Set keep_worktree: false to remove it at run end instead.
 // reuse_worktree implies keep regardless of the explicit setting; without that
 // the next run would have nothing to reuse.
-func (t *Task) ShouldKeepWorktree() bool {
-	if t.ShouldReuseWorktree() {
+func (j *Job) ShouldKeepWorktree() bool {
+	if j.ShouldReuseWorktree() {
 		return true
 	}
-	if t.KeepWorktree != nil {
-		return *t.KeepWorktree
+	if j.KeepWorktree != nil {
+		return *j.KeepWorktree
 	}
 	return true
 }
 
 // ShouldReuseWorktree returns true when an existing worktree should be reused
 // as-is rather than replaced with a fresh snapshot of HEAD.
-func (t *Task) ShouldReuseWorktree() bool {
-	return t.ReuseWorktree != nil && *t.ReuseWorktree
+func (j *Job) ShouldReuseWorktree() bool {
+	return j.ReuseWorktree != nil && *j.ReuseWorktree
 }
 
-// WorktreeMode returns a short label summarising how this task uses worktrees:
-//   - ""          when the task runs directly in its folder
+// WorktreeMode returns a short label summarising how this job uses worktrees:
+//   - ""          when the job runs directly in its folder
 //   - "ephemeral" when a fresh worktree is created and removed each run
 //   - "fresh"     when a fresh worktree is created each run and kept afterwards
 //   - "reused"    when an existing worktree is reused across runs
-func (t *Task) WorktreeMode() string {
-	if !t.ShouldUseWorktree() {
+func (j *Job) WorktreeMode() string {
+	if !j.ShouldUseWorktree() {
 		return ""
 	}
-	if t.ShouldReuseWorktree() {
+	if j.ShouldReuseWorktree() {
 		return "reused"
 	}
-	if t.ShouldKeepWorktree() {
+	if j.ShouldKeepWorktree() {
 		return "fresh"
 	}
 	return "ephemeral"
 }
 
 // CronExpr returns the resolved cron expression (populated after Validate).
-func (t *Task) CronExpr() string { return t.cronExpr }
+func (j *Job) CronExpr() string { return j.cronExpr }
 
 // JitterDuration returns the resolved jitter (populated after Validate).
-func (t *Task) JitterDuration() time.Duration { return t.jitterResolved }
+func (j *Job) JitterDuration() time.Duration { return j.jitterResolved }
 
-func (t *Task) ClearJitter() {
-	t.jitterResolved = 0
-	t.Jitter = nil
+func (j *Job) ClearJitter() {
+	j.jitterResolved = 0
+	j.Jitter = nil
 }
 
-// IsEnabled returns true when the task is enabled (defaults true).
-func (t *Task) IsEnabled() bool {
-	return t.Enabled == nil || *t.Enabled
+// IsEnabled returns true when the job is enabled (defaults true).
+func (j *Job) IsEnabled() bool {
+	return j.Enabled == nil || *j.Enabled
 }
 
 // Load parses the config at path.
@@ -241,7 +242,7 @@ func defaultDefaults() Defaults {
 	}
 }
 
-// Validate resolves and validates all tasks.
+// Validate resolves and validates all jobs.
 func (c *Config) Validate() error {
 	if c.Defaults.Shell == "" {
 		c.Defaults.Shell = "/bin/sh"
@@ -275,54 +276,113 @@ func (c *Config) Validate() error {
 	}
 
 	seen := map[string]bool{}
-	for i, t := range c.Tasks {
-		if t.Name == "" {
-			return fmt.Errorf("task[%d]: name is required", i)
+	for i, j := range c.Jobs {
+		if j.Name == "" {
+			return fmt.Errorf("job[%d]: name is required", i)
 		}
-		if !validName.MatchString(t.Name) {
-			return fmt.Errorf("task %q: name must match [a-z0-9][a-z0-9-_]*", t.Name)
+		if !validName.MatchString(j.Name) {
+			return fmt.Errorf("job %q: name must match [a-z0-9][a-z0-9-_]*", j.Name)
 		}
-		if seen[t.Name] {
-			return fmt.Errorf("task %q: duplicate name", t.Name)
+		if seen[j.Name] {
+			return fmt.Errorf("job %q: duplicate name", j.Name)
 		}
-		if templateNames[t.Name] {
-			return fmt.Errorf("task %q: name collides with template of the same name", t.Name)
+		if templateNames[j.Name] {
+			return fmt.Errorf("job %q: name collides with template of the same name", j.Name)
 		}
-		seen[t.Name] = true
+		seen[j.Name] = true
 
-		if t.Schedule != "" {
-			parsed, hasJitter, err := schedule.Parse(t.Schedule)
+		if j.Schedule != "" {
+			parsed, hasJitter, err := schedule.Parse(j.Schedule)
 			if err != nil {
-				return fmt.Errorf("task %q schedule %q: %w", t.Name, t.Schedule, err)
+				return fmt.Errorf("job %q schedule %q: %w", j.Name, j.Schedule, err)
 			}
-			t.cronExpr = parsed
-			if hasJitter || (t.Jitter != nil && t.Jitter.Duration > 0) {
-				if t.Jitter != nil && t.Jitter.Duration > 0 {
-					t.jitterResolved = t.Jitter.Duration
+			j.cronExpr = parsed
+			if hasJitter || (j.Jitter != nil && j.Jitter.Duration > 0) {
+				if j.Jitter != nil && j.Jitter.Duration > 0 {
+					j.jitterResolved = j.Jitter.Duration
 				} else {
-					t.jitterResolved = c.Defaults.Jitter.Duration
+					j.jitterResolved = c.Defaults.Jitter.Duration
 				}
 			}
 		}
 
-		if t.Folder == "" {
-			return fmt.Errorf("task %q: folder is required", t.Name)
+		if j.Folder == "" {
+			return fmt.Errorf("job %q: folder is required", j.Name)
 		}
-		info, err := os.Stat(t.Folder)
+		expanded, err := ExpandFwsFolder(j.Folder)
 		if err != nil {
-			return fmt.Errorf("task %q folder %q: %w", t.Name, t.Folder, err)
+			return fmt.Errorf("job %q: %w", j.Name, err)
+		}
+		j.Folder = expanded
+		// When the resolved folder is an fws-managed feature workspace, default
+		// worktree:false — the workspace is already its own isolation boundary
+		// and bigband should run jobs directly inside it rather than nesting
+		// another worktree underneath. Explicit worktree: settings are honoured.
+		if j.Worktree == nil && IsFwsWorkspace(j.Folder) {
+			f := false
+			j.Worktree = &f
+		}
+		info, err := os.Stat(j.Folder)
+		if err != nil {
+			return fmt.Errorf("job %q folder %q: %w", j.Name, j.Folder, err)
 		}
 		if !info.IsDir() {
-			return fmt.Errorf("task %q folder %q: not a directory", t.Name, t.Folder)
+			return fmt.Errorf("job %q folder %q: not a directory", j.Name, j.Folder)
 		}
-		if err := c.CheckFolderAllowed(t.Folder); err != nil {
-			return fmt.Errorf("task %q: %w", t.Name, err)
+		if err := c.CheckFolderAllowed(j.Folder); err != nil {
+			return fmt.Errorf("job %q: %w", j.Name, err)
 		}
-		if strings.TrimSpace(t.Prompt) == "" {
-			return fmt.Errorf("task %q: prompt is required", t.Name)
+		if strings.TrimSpace(j.Prompt) == "" {
+			return fmt.Errorf("job %q: prompt is required", j.Name)
 		}
 	}
 	return nil
+}
+
+// ExpandFwsFolder resolves a folder value of the form `fws:<name>` by shelling
+// out to the `fws` CLI. Non-prefixed values pass through unchanged. Returns a
+// clear error if `fws` is not on PATH or the workspace name doesn't resolve.
+func ExpandFwsFolder(folder string) (string, error) {
+	if !strings.HasPrefix(folder, "fws:") {
+		return folder, nil
+	}
+	name := strings.TrimSpace(strings.TrimPrefix(folder, "fws:"))
+	if name == "" {
+		return "", fmt.Errorf("folder %q: fws: prefix with empty workspace name", folder)
+	}
+	bin, err := exec.LookPath("fws")
+	if err != nil {
+		if home, herr := os.UserHomeDir(); herr == nil {
+			cand := filepath.Join(home, "bin", "fws")
+			if _, sterr := os.Stat(cand); sterr == nil {
+				bin = cand
+			}
+		}
+		if bin == "" {
+			return "", fmt.Errorf("folder %q: fws CLI not found on PATH or ~/bin (needed to resolve fws:%s)", folder, name)
+		}
+	}
+	out, err := exec.Command(bin, "resolve", name).Output()
+	if err != nil {
+		return "", fmt.Errorf("folder %q: fws resolve %s failed: %w", folder, name, err)
+	}
+	path := strings.TrimSpace(string(out))
+	if path == "" {
+		return "", fmt.Errorf("folder %q: fws resolve %s returned empty path", folder, name)
+	}
+	return path, nil
+}
+
+// IsFwsWorkspace reports whether folder is an fws-managed feature workspace,
+// detected by the presence of a sidecar JSON file alongside the worktree dir
+// (e.g. `~/projects/feature-worktrees/cloudgrid__foo/` has a sibling
+// `cloudgrid__foo.json`).
+func IsFwsWorkspace(folder string) bool {
+	if folder == "" {
+		return false
+	}
+	_, err := os.Stat(folder + ".json")
+	return err == nil
 }
 
 // CheckFolderAllowed reports whether folder satisfies defaults.allowed_folders.
@@ -397,18 +457,18 @@ func (c *Config) Save(path string) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// TaskByName returns the task with the given name or nil.
-func (c *Config) TaskByName(name string) *Task {
-	for _, t := range c.Tasks {
-		if t.Name == name {
-			return t
+// JobByName returns the job with the given name or nil.
+func (c *Config) JobByName(name string) *Job {
+	for _, j := range c.Jobs {
+		if j.Name == name {
+			return j
 		}
 	}
 	return nil
 }
 
 // TemplateByName returns the template with the given name or nil.
-func (c *Config) TemplateByName(name string) *Task {
+func (c *Config) TemplateByName(name string) *Job {
 	for _, t := range c.Templates {
 		if t.Name == name {
 			return t
@@ -417,12 +477,12 @@ func (c *Config) TemplateByName(name string) *Task {
 	return nil
 }
 
-// FindTaskOrTemplate returns the task or template with the given name, and a
-// label indicating which it was ("task" or "template"). Returns nil if neither
+// FindJobOrTemplate returns the job or template with the given name, and a
+// label indicating which it was ("job" or "template"). Returns nil if neither
 // matches.
-func (c *Config) FindTaskOrTemplate(name string) (*Task, string) {
-	if t := c.TaskByName(name); t != nil {
-		return t, "task"
+func (c *Config) FindJobOrTemplate(name string) (*Job, string) {
+	if j := c.JobByName(name); j != nil {
+		return j, "job"
 	}
 	if t := c.TemplateByName(name); t != nil {
 		return t, "template"
@@ -430,15 +490,15 @@ func (c *Config) FindTaskOrTemplate(name string) (*Task, string) {
 	return nil, ""
 }
 
-// DefaultAgent is the provider name used when neither the task nor the
+// DefaultAgent is the provider name used when neither the job nor the
 // top-level defaults specify one.
 const DefaultAgent = "claude"
 
-// EffectiveAgent returns the agent provider name for a task: task-level when
+// EffectiveAgent returns the agent provider name for a job: job-level when
 // set, otherwise the top-level default, otherwise DefaultAgent.
-func (c *Config) EffectiveAgent(t *Task) string {
-	if t.Agent != "" {
-		return t.Agent
+func (c *Config) EffectiveAgent(j *Job) string {
+	if j.Agent != "" {
+		return j.Agent
 	}
 	if c.Defaults.Agent != "" {
 		return c.Defaults.Agent
@@ -446,29 +506,29 @@ func (c *Config) EffectiveAgent(t *Task) string {
 	return DefaultAgent
 }
 
-// EffectiveModel returns the model for a task, falling back to the global
+// EffectiveModel returns the model for a job, falling back to the global
 // default. Empty when neither is set — the agent provider picks its own
 // default in that case.
-func (c *Config) EffectiveModel(t *Task) string {
-	if t.Model != "" {
-		return t.Model
+func (c *Config) EffectiveModel(j *Job) string {
+	if j.Model != "" {
+		return j.Model
 	}
 	return c.Defaults.Model
 }
 
-// EffectiveEffort returns the thinking/effort budget for a task, falling back
+// EffectiveEffort returns the thinking/effort budget for a job, falling back
 // to the global default. Empty when neither is set.
-func (c *Config) EffectiveEffort(t *Task) string {
-	if t.Effort != "" {
-		return t.Effort
+func (c *Config) EffectiveEffort(j *Job) string {
+	if j.Effort != "" {
+		return j.Effort
 	}
 	return c.Defaults.Effort
 }
 
-// EffectiveTimeout returns the task timeout, falling back to the default.
-func (c *Config) EffectiveTimeout(t *Task) time.Duration {
-	if t.Timeout != nil && t.Timeout.Duration > 0 {
-		return t.Timeout.Duration
+// EffectiveTimeout returns the job timeout, falling back to the default.
+func (c *Config) EffectiveTimeout(j *Job) time.Duration {
+	if j.Timeout != nil && j.Timeout.Duration > 0 {
+		return j.Timeout.Duration
 	}
 	return c.Defaults.Timeout.Duration
 }

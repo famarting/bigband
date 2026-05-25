@@ -15,15 +15,15 @@ import (
 type Store struct {
 	mu      sync.Mutex
 	path    string
-	Tasks   map[string]TaskMapping   `json:"tasks"`
-	Runs    map[string]RunMapping    `json:"runs"`
+	Jobs    map[string]JobMapping     `json:"jobs"`
+	Runs    map[string]RunMapping     `json:"runs"`
 	Threads map[string]ThreadSnapshot `json:"threads"` // thread_ts → per-thread snapshot
 }
 
-// TaskMapping is a per-task staging area for pre-completion events
+// JobMapping is a per-job staging area for pre-completion events
 // (session_started, worktree_ready) and tracks the latest thread TS for
 // routing completion events back to the right Slack thread.
-type TaskMapping struct {
+type JobMapping struct {
 	ThreadTS     string `json:"thread_ts"`
 	Channel      string `json:"channel"`
 	SessionID    string `json:"session_id,omitempty"`
@@ -35,9 +35,9 @@ type TaskMapping struct {
 // ThreadSnapshot captures the exact session and folder context at the moment
 // a run posts its completion into a Slack thread. Keyed by thread_ts in the
 // store so each thread carries independent state: a later run of the same
-// task does not overwrite the session of an earlier thread.
+// job does not overwrite the session of an earlier thread.
 type ThreadSnapshot struct {
-	TaskName     string `json:"task_name"`
+	JobName      string `json:"job_name"`
 	SessionID    string `json:"session_id,omitempty"`
 	Folder       string `json:"folder,omitempty"`
 	Worktree     string `json:"worktree,omitempty"`
@@ -46,11 +46,11 @@ type ThreadSnapshot struct {
 	LastSeenUnix int64  `json:"last_seen_unix,omitempty"`
 }
 
-// RunMapping is keyed by run_id (task/timestamp). One row per individual run,
+// RunMapping is keyed by run_id (job/timestamp). One row per individual run,
 // so a follow-up's completion event can find the right thread. LastSeenUnix
 // is set on creation and used for retention pruning.
 type RunMapping struct {
-	TaskName     string `json:"task_name"`
+	JobName      string `json:"job_name"`
 	ThreadTS     string `json:"thread_ts"`
 	Channel      string `json:"channel"`
 	LastSeenUnix int64  `json:"last_seen_unix,omitempty"`
@@ -64,7 +64,7 @@ func LoadStore() (*Store, error) {
 	}
 	s := &Store{
 		path:    path,
-		Tasks:   map[string]TaskMapping{},
+		Jobs:    map[string]JobMapping{},
 		Runs:    map[string]RunMapping{},
 		Threads: map[string]ThreadSnapshot{},
 	}
@@ -78,8 +78,8 @@ func LoadStore() (*Store, error) {
 	if err := json.Unmarshal(data, s); err != nil {
 		return s, nil // corrupt: start fresh
 	}
-	if s.Tasks == nil {
-		s.Tasks = map[string]TaskMapping{}
+	if s.Jobs == nil {
+		s.Jobs = map[string]JobMapping{}
 	}
 	if s.Runs == nil {
 		s.Runs = map[string]RunMapping{}
@@ -92,33 +92,33 @@ func LoadStore() (*Store, error) {
 
 // LinkRun records that a run posted into a thread. It:
 //   - writes a run-keyed mapping so completion events for follow-up runs find the thread,
-//   - updates the task-keyed staging entry for routing future completion events,
+//   - updates the job-keyed staging entry for routing future completion events,
 //   - writes a per-thread snapshot that freezes the session/folder/allowReplies at this
 //     moment so replies to this thread always resume the correct session even after the
-//     same task has run again and overwritten the task-level staging entry.
-func (s *Store) LinkRun(runID, taskName, channel, threadTS, sessionID string, allowReplies bool) error {
+//     same job has run again and overwritten the job-level staging entry.
+func (s *Store) LinkRun(runID, jobName, channel, threadTS, sessionID string, allowReplies bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().Unix()
 
-	s.Runs[runID] = RunMapping{TaskName: taskName, ThreadTS: threadTS, Channel: channel, LastSeenUnix: now}
+	s.Runs[runID] = RunMapping{JobName: jobName, ThreadTS: threadTS, Channel: channel, LastSeenUnix: now}
 
-	// Update task-level staging (used to route completion events back to threads
+	// Update job-level staging (used to route completion events back to threads
 	// and as a source for folder/worktree when promoting to per-thread snapshot).
-	staged := s.Tasks[taskName]
+	staged := s.Jobs[jobName]
 	staged.ThreadTS = threadTS
 	staged.Channel = channel
 	if sessionID != "" {
 		staged.SessionID = sessionID
 	}
 	staged.LastSeenUnix = now
-	s.Tasks[taskName] = staged
+	s.Jobs[jobName] = staged
 
 	// Promote staged state to a per-thread snapshot. Existing snapshot fields
-	// (e.g. folder set by an earlier LinkTaskMeta) are preserved if the new
+	// (e.g. folder set by an earlier LinkJobMeta) are preserved if the new
 	// values are empty, so partial updates don't wipe good data.
 	snap := s.Threads[threadTS]
-	snap.TaskName = taskName
+	snap.JobName = jobName
 	snap.Channel = channel
 	snap.AllowReplies = allowReplies
 	if sessionID != "" {
@@ -138,11 +138,11 @@ func (s *Store) LinkRun(runID, taskName, channel, threadTS, sessionID string, al
 	return s.save()
 }
 
-// SetTaskSessionID records the latest Claude session id for a task. Used when
+// SetJobSessionID records the latest Claude session id for a job. Used when
 // the session-started event arrives independently of LinkRun (e.g. for runs
 // that didn't originate from Slack). Also propagates the session id to the
 // current thread snapshot so replies resume the right session mid-run.
-func (s *Store) SetTaskSessionID(taskName, sessionID string) error {
+func (s *Store) SetJobSessionID(jobName, sessionID string) error {
 	if sessionID == "" {
 		return nil
 	}
@@ -150,10 +150,10 @@ func (s *Store) SetTaskSessionID(taskName, sessionID string) error {
 	defer s.mu.Unlock()
 	now := time.Now().Unix()
 
-	staged := s.Tasks[taskName]
+	staged := s.Jobs[jobName]
 	staged.SessionID = sessionID
 	staged.LastSeenUnix = now
-	s.Tasks[taskName] = staged
+	s.Jobs[jobName] = staged
 
 	// Propagate to the current thread snapshot so a reply that arrives before
 	// the run completes still picks up the live session id.
@@ -167,16 +167,16 @@ func (s *Store) SetTaskSessionID(taskName, sessionID string) error {
 	return s.save()
 }
 
-// LinkTaskMeta records the task's folder/worktree alongside the thread, so
+// LinkJobMeta records the job's folder/worktree alongside the thread, so
 // follow-ups know where to run. It also propagates the values to the current
-// thread snapshot (identified by the task's ThreadTS), mirroring what
-// SetTaskSessionID does for session ids — this ensures the original trigger
+// thread snapshot (identified by the job's ThreadTS), mirroring what
+// SetJobSessionID does for session ids — this ensures the original trigger
 // thread can follow up even before the completion event fires.
-func (s *Store) LinkTaskMeta(taskName, folder, worktree string) error {
+func (s *Store) LinkJobMeta(jobName, folder, worktree string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().Unix()
-	prev := s.Tasks[taskName]
+	prev := s.Jobs[jobName]
 	if folder != "" {
 		prev.Folder = folder
 	}
@@ -184,7 +184,7 @@ func (s *Store) LinkTaskMeta(taskName, folder, worktree string) error {
 		prev.Worktree = worktree
 	}
 	prev.LastSeenUnix = now
-	s.Tasks[taskName] = prev
+	s.Jobs[jobName] = prev
 
 	if prev.ThreadTS != "" && (folder != "" || worktree != "") {
 		snap := s.Threads[prev.ThreadTS]
@@ -201,9 +201,37 @@ func (s *Store) LinkTaskMeta(taskName, folder, worktree string) error {
 	return s.save()
 }
 
-// Prune drops Runs and Tasks last touched before cutoff, plus Threads that
-// no longer point at a known task. Returns counts for logging.
-func (s *Store) Prune(cutoff time.Time) (runs, tasks, threads int) {
+// SetJobFolderWorktree records the job's folder/worktree authoritatively,
+// overwriting any prior value — including with an empty string to mark that
+// the latest run did NOT use a worktree. Use this at completion time, when
+// the truth is known. Compare LinkJobMeta, which preserves prior values on
+// empty input to support partial updates from early lifecycle events; that
+// "sticky" behaviour leaks stale worktree paths from older runs into the
+// current thread snapshot, which then mis-routes followups.
+func (s *Store) SetJobFolderWorktree(jobName, folder, worktree string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().Unix()
+	prev := s.Jobs[jobName]
+	prev.Folder = folder
+	prev.Worktree = worktree
+	prev.LastSeenUnix = now
+	s.Jobs[jobName] = prev
+
+	if prev.ThreadTS != "" {
+		if snap, ok := s.Threads[prev.ThreadTS]; ok {
+			snap.Folder = folder
+			snap.Worktree = worktree
+			snap.LastSeenUnix = now
+			s.Threads[prev.ThreadTS] = snap
+		}
+	}
+	return s.save()
+}
+
+// Prune drops Runs and Jobs last touched before cutoff, plus Threads that
+// no longer point at a known job. Returns counts for logging.
+func (s *Store) Prune(cutoff time.Time) (runs, jobs, threads int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cutoffUnix := cutoff.Unix()
@@ -213,22 +241,30 @@ func (s *Store) Prune(cutoff time.Time) (runs, tasks, threads int) {
 			runs++
 		}
 	}
-	for name, t := range s.Tasks {
-		if t.LastSeenUnix > 0 && t.LastSeenUnix < cutoffUnix {
-			delete(s.Tasks, name)
-			tasks++
+	for name, j := range s.Jobs {
+		if j.LastSeenUnix > 0 && j.LastSeenUnix < cutoffUnix {
+			delete(s.Jobs, name)
+			jobs++
 		}
 	}
 	for ts, snap := range s.Threads {
+		// Drop empty placeholder entries (no job, no timestamp). They never
+		// receive an update so the timestamped retention check below would
+		// otherwise keep them forever.
+		if snap.LastSeenUnix == 0 && snap.JobName == "" {
+			delete(s.Threads, ts)
+			threads++
+			continue
+		}
 		if snap.LastSeenUnix > 0 && snap.LastSeenUnix < cutoffUnix {
 			delete(s.Threads, ts)
 			threads++
 		}
 	}
-	if runs+tasks+threads > 0 {
+	if runs+jobs+threads > 0 {
 		_ = s.save()
 	}
-	return runs, tasks, threads
+	return runs, jobs, threads
 }
 
 // LookupRun returns the thread mapping for a run id, or zero if absent.
@@ -239,16 +275,16 @@ func (s *Store) LookupRun(runID string) RunMapping {
 }
 
 // LookupThread returns the per-thread snapshot for the given thread TS.
-// The snapshot is independent of the task's current state, so replies to an
+// The snapshot is independent of the job's current state, so replies to an
 // older thread always resume the session that was active for that specific run.
-func (s *Store) LookupThread(threadTS string) (taskName string, snap ThreadSnapshot, ok bool) {
+func (s *Store) LookupThread(threadTS string) (jobName string, snap ThreadSnapshot, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snap, ok = s.Threads[threadTS]
-	if !ok || snap.TaskName == "" {
+	if !ok || snap.JobName == "" {
 		return "", ThreadSnapshot{}, false
 	}
-	return snap.TaskName, snap, true
+	return snap.JobName, snap, true
 }
 
 const maxStoreBytes = 10 * 1024 * 1024 // 10 MiB
@@ -261,12 +297,16 @@ func (s *Store) pruneOldest(cutoff time.Time) {
 			delete(s.Runs, id)
 		}
 	}
-	for name, t := range s.Tasks {
-		if t.LastSeenUnix > 0 && t.LastSeenUnix < cutoffUnix {
-			delete(s.Tasks, name)
+	for name, j := range s.Jobs {
+		if j.LastSeenUnix > 0 && j.LastSeenUnix < cutoffUnix {
+			delete(s.Jobs, name)
 		}
 	}
 	for ts, snap := range s.Threads {
+		if snap.LastSeenUnix == 0 && snap.JobName == "" {
+			delete(s.Threads, ts)
+			continue
+		}
 		if snap.LastSeenUnix > 0 && snap.LastSeenUnix < cutoffUnix {
 			delete(s.Threads, ts)
 		}

@@ -48,8 +48,8 @@ func newEnableCmd() *cobra.Command {
 		thread  bool
 	)
 	cmd := &cobra.Command{
-		Use:   "enable <task>",
-		Short: "Add an enabled mirror rule for a task",
+		Use:   "enable <job>",
+		Short: "Add an enabled mirror rule for a job",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := LoadConfig()
@@ -57,17 +57,17 @@ func newEnableCmd() *cobra.Command {
 				return err
 			}
 			name := args[0]
-			// Replace any existing rule for this exact task.
+			// Replace any existing rule for this exact job.
 			out := cfg.Mirror[:0]
 			for _, r := range cfg.Mirror {
-				if r.Task == name {
+				if r.Job == name {
 					continue
 				}
 				out = append(out, r)
 			}
 			t := true
 			out = append(out, MirrorRule{
-				Task:         name,
+				Job:          name,
 				Channel:      channel,
 				AllowReplies: thread,
 				Enabled:      &t,
@@ -88,8 +88,8 @@ func newEnableCmd() *cobra.Command {
 
 func newDisableCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "disable <task>",
-		Short: "Disable mirror rule for a task",
+		Use:   "disable <job>",
+		Short: "Disable mirror rule for a job",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := LoadConfig()
@@ -99,7 +99,7 @@ func newDisableCmd() *cobra.Command {
 			name := args[0]
 			found := false
 			for i := range cfg.Mirror {
-				if cfg.Mirror[i].Task == name {
+				if cfg.Mirror[i].Job == name {
 					f := false
 					cfg.Mirror[i].Enabled = &f
 					found = true

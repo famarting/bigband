@@ -53,7 +53,7 @@ func TestStateRoundTrip(t *testing.T) {
 	wakeAt := time.Date(2026, 5, 11, 5, 59, 0, 0, time.Local)
 	fireAt := wakeAt.Add(60 * time.Second)
 	in := &State{Events: []WakeEvent{
-		{Task: "my-buddy-kickoff", WakeAt: wakeAt, FireAt: fireAt, ScheduledAt: time.Now()},
+		{Job: "my-buddy-kickoff", WakeAt: wakeAt, FireAt: fireAt, ScheduledAt: time.Now()},
 	}}
 	if err := in.Save(); err != nil {
 		t.Fatal(err)
@@ -66,8 +66,8 @@ func TestStateRoundTrip(t *testing.T) {
 		t.Fatalf("got %d events, want 1", len(out.Events))
 	}
 	got := out.Events[0]
-	if got.Task != "my-buddy-kickoff" {
-		t.Fatalf("Task = %q, want my-buddy-kickoff", got.Task)
+	if got.Job != "my-buddy-kickoff" {
+		t.Fatalf("Job = %q, want my-buddy-kickoff", got.Job)
 	}
 	if !got.WakeAt.Equal(wakeAt) {
 		t.Fatalf("WakeAt = %v, want %v", got.WakeAt, wakeAt)

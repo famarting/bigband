@@ -25,7 +25,7 @@ func NewStatusCmd() *cobra.Command {
 	var running bool
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Show recent task execution history",
+		Short: "Show recent job execution history",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return printHistory(num, running)
 		},
@@ -36,19 +36,19 @@ func NewStatusCmd() *cobra.Command {
 }
 
 type runEntry struct {
-	Task         string
+	Job          string
 	Started      time.Time
 	Status       string
 	Duration     string
 	Active       bool
 	WorktreePath string
 	Folder       string
-	// WorktreeMode reflects the task's current config, not necessarily the
-	// config at the time of the run. Tasks deleted from config show "".
+	// WorktreeMode reflects the job's current config, not necessarily the
+	// config at the time of the run. Jobs deleted from config show "".
 	WorktreeMode string
 }
 
-type taskInfo struct {
+type jobInfo struct {
 	folder string
 	mode   string
 }
@@ -67,8 +67,8 @@ func printHistory(limit int, onlyRunning bool) error {
 	fmt.Println()
 
 	st, _ := state.Load()
-	tasks := loadTaskInfo()
-	entries := collectRuns(st, tasks)
+	jobs := loadJobInfo()
+	entries := collectRuns(st, jobs)
 
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Started.After(entries[j].Started)
@@ -87,12 +87,12 @@ func printHistory(limit int, onlyRunning bool) error {
 	}
 
 	if len(entries) == 0 {
-		fmt.Println("no task runs found")
+		fmt.Println("no job runs found")
 		return nil
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "  TASK\tSTARTED\tSTATUS\tDURATION\tRUN DIR")
+	fmt.Fprintln(w, "  JOB\tSTARTED\tSTATUS\tDURATION\tRUN DIR")
 	for _, e := range entries {
 		marker := " "
 		if e.Active {
@@ -107,41 +107,41 @@ func printHistory(limit int, onlyRunning bool) error {
 				dur = "?"
 			}
 		}
-		fmt.Fprintf(w, "%s %s\t%s\t%s\t%s\t%s\n", marker, e.Task, started, e.Status, dur, runDir(e.WorktreePath, e.Folder, e.WorktreeMode))
+		fmt.Fprintf(w, "%s %s\t%s\t%s\t%s\t%s\n", marker, e.Job, started, e.Status, dur, runDir(e.WorktreePath, e.Folder, e.WorktreeMode))
 	}
 	return w.Flush()
 }
 
-// loadTaskInfo returns a map of task name → folder and worktree mode taken
-// from the current config, used to enrich historical run rows. Tasks removed
+// loadJobInfo returns a map of job name → folder and worktree mode taken
+// from the current config, used to enrich historical run rows. Jobs removed
 // from config since the run will simply be missing from the map.
-func loadTaskInfo() map[string]taskInfo {
+func loadJobInfo() map[string]jobInfo {
 	cfg, err := config.Load(paths.Config())
 	if err != nil {
 		return nil
 	}
-	m := make(map[string]taskInfo, len(cfg.Tasks))
-	for _, t := range cfg.Tasks {
-		m[t.Name] = taskInfo{folder: t.Folder, mode: t.WorktreeMode()}
+	m := make(map[string]jobInfo, len(cfg.Jobs))
+	for _, j := range cfg.Jobs {
+		m[j.Name] = jobInfo{folder: j.Folder, mode: j.WorktreeMode()}
 	}
 	return m
 }
 
-func collectRuns(st *state.State, tasks map[string]taskInfo) []runEntry {
+func collectRuns(st *state.State, jobs map[string]jobInfo) []runEntry {
 	logsDir := paths.LogsDir()
-	taskDirs, err := os.ReadDir(logsDir)
+	jobDirs, err := os.ReadDir(logsDir)
 	if err != nil {
 		return nil
 	}
 
 	var entries []runEntry
-	for _, td := range taskDirs {
+	for _, td := range jobDirs {
 		if !td.IsDir() {
 			continue
 		}
-		taskName := td.Name()
-		taskLogDir := paths.TaskLogDir(taskName)
-		files, err := os.ReadDir(taskLogDir)
+		jobName := td.Name()
+		jobLogDir := paths.JobLogDir(jobName)
+		files, err := os.ReadDir(jobLogDir)
 		if err != nil {
 			continue
 		}
@@ -159,19 +159,19 @@ func collectRuns(st *state.State, tasks map[string]taskInfo) []runEntry {
 		}
 		sort.Strings(logFiles)
 
-		ts := st.Get(taskName)
+		js := st.Get(jobName)
 		for i, fname := range logFiles {
 			started, err := parseLogStartTime(fname)
 			if err != nil {
 				continue
 			}
 			isLatest := i == len(logFiles)-1
-			logPath := filepath.Join(taskLogDir, fname)
+			logPath := filepath.Join(jobLogDir, fname)
 			status, duration, hasEnd := parseLogEnd(logPath)
 
 			active := false
 			if !hasEnd {
-				if isLatest && proc.Alive(ts.RunningPID) {
+				if isLatest && proc.Alive(js.RunningPID) {
 					active = true
 					status = "running"
 				} else {
@@ -180,19 +180,19 @@ func collectRuns(st *state.State, tasks map[string]taskInfo) []runEntry {
 			}
 			wt := ""
 			if isLatest {
-				wt = ts.WorktreePath
+				wt = js.WorktreePath
 			}
-			info := tasks[taskName]
+			info := jobs[jobName]
 			folder := info.folder
 			// Ephemeral one-offs (submit_run with ephemeral=true) aren't in
 			// config; recover their folder from state, which the runner
 			// records via SetRunning. Legacy state entries written before
 			// that fix will still show "-".
 			if folder == "" {
-				folder = ts.Folder
+				folder = js.Folder
 			}
 			entries = append(entries, runEntry{
-				Task:         taskName,
+				Job:          jobName,
 				Started:      started,
 				Status:       status,
 				Duration:     duration,

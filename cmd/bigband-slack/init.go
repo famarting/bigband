@@ -18,7 +18,7 @@ import (
 const configTemplate = `# bigband-slack configuration.
 #
 # Opt-in by default: with empty mirror[] and trigger_channels[], this binary
-# does NOTHING. Add rules below to mirror task completions into Slack and / or
+# does NOTHING. Add rules below to mirror job completions into Slack and / or
 # fire bigband runs from Slack messages.
 #
 # Tokens may be inlined (insecure), env:NAME (read $NAME at startup), or
@@ -29,8 +29,8 @@ slack:
   bot_token: env:SLACK_BOT_TOKEN          # xoxb-... — Bot User OAuth Token
   default_channel: ""                     # fallback channel name when a rule omits one
 
-# Outbound: which task runs are mirrored to Slack, and how. First match wins.
-# Each rule needs at least one of "task" (exact name or simple glob) or "tasks"
+# Outbound: which job runs are mirrored to Slack, and how. First match wins.
+# Each rule needs at least one of "job" (exact name or simple glob) or "jobs"
 # (list). Omit or set enabled:false to opt out.
 #
 # Wildcard note: only "*" is supported as a wildcard character. It may appear
@@ -40,12 +40,12 @@ slack:
 mirror: []
 # Example rule (uncomment + edit):
 # mirror:
-#   - task: morning-brief
+#   - job: morning-brief
 #     channel: "#daily"
 #     open_thread: true                   # post final message as a new thread
 #     include_status: true                # prepend "ok in 4m12s"
 #     on_failure: false                   # also post on non-success runs
-#   - tasks: ["report-*", "alert-*"]
+#   - jobs: ["report-*", "alert-*"]
 #     channel: "#reports"
 #     open_thread: true
 
@@ -58,9 +58,9 @@ trigger_channels: []
 #     require_mention: true
 #     allow_freeform_prompt: true         # plain message → ephemeral submit_run
 #     commands:
-#       - match: "^run (?P<task>\\S+)$"
-#         action: run                     # bigband run <task>
-#       - match: "^task (?P<name>\\S+):\\s*(?P<prompt>.+)"
+#       - match: "^run (?P<job>\\S+)$"
+#         action: run                     # bigband run <job>
+#       - match: "^job (?P<name>\\S+):\\s*(?P<prompt>.+)"
 #         action: submit
 
 # Thread-reply behaviour
@@ -89,7 +89,7 @@ const manifestTemplate = `# bigband-slack — extension manifest.
 # Verify after editing: bigband ext list
 
 name: bigband-slack
-description: "Slack mirror — opt-in per task in extensions/bigband-slack/config.yaml"
+description: "Slack mirror — opt-in per job in extensions/bigband-slack/config.yaml"
 command:
   - bigband-slack
   - daemon
@@ -107,8 +107,8 @@ restart:
 
 subscribes:
   - claude.session_started
-  - task_run.worktree_ready
-  - task_run.completed
+  - job_run.worktree_ready
+  - job_run.completed
 `
 
 // ManifestPath returns the canonical manifest path for bigband-slack.
@@ -127,7 +127,7 @@ func newInitCmd() *cobra.Command {
 		Short: "Scaffold the bigband-slack config, manifest, and state directory",
 		Long: `Writes config.yaml (containing your Slack rules) and manifest.yaml (which
 the bigband daemon uses to supervise this binary) into
-~/.bigband-tasks/extensions/bigband-slack/.
+~/.bigband/extensions/bigband-slack/.
 
 By default neither file is overwritten if it already exists. Use:
   --force-manifest   to refresh just manifest.yaml (safe; no rules)
@@ -170,7 +170,7 @@ By default neither file is overwritten if it already exists. Use:
 			fmt.Println("  2. Export tokens (or replace env: refs in the config with file:/path):")
 			fmt.Println("       export SLACK_APP_TOKEN=xapp-...")
 			fmt.Println("       export SLACK_BOT_TOKEN=xoxb-...")
-			fmt.Println("  3. Add a mirror rule:    bigband-slack enable <task> --channel '#bigband'")
+			fmt.Println("  3. Add a mirror rule:    bigband-slack enable <job> --channel '#bigband'")
 			fmt.Println("  4. Make sure bigband itself is installed: bigband install")
 			fmt.Println("     The daemon will pick up this manifest within ~300ms.")
 			fmt.Println("  5. Verify:               bigband ext list")

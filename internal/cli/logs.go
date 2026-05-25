@@ -17,7 +17,7 @@ import (
 
 // tailLines streams new lines from f as they appear, polling on EOF. When
 // stop is non-nil, the function returns once it returns true for any printed
-// line (used to terminate task-log follows at the "=== END" marker). When
+// line (used to terminate job-log follows at the "=== END" marker). When
 // stop is nil the loop runs until f returns a non-EOF error.
 func tailLines(f *os.File, stop func(string) bool) error {
 	fmt.Println("\n--- following ---")
@@ -40,19 +40,19 @@ func tailLines(f *os.File, stop func(string) bool) error {
 	}
 }
 
-// tailFile follows a task log until the runner's "=== END" marker.
+// tailFile follows a job log until the runner's "=== END" marker.
 func tailFile(f *os.File) error {
 	return tailLines(f, func(line string) bool { return strings.Contains(line, "=== END") })
 }
 
-// waitAndFollowLog polls until a new log file appears for taskName, then
+// waitAndFollowLog polls until a new log file appears for jobName, then
 // streams it until the "=== END" marker. prevLog is the symlink target before
 // the run was triggered; the function waits until the symlink points to a
-// different (newer) file. Pass an empty string when the task has never run.
-func waitAndFollowLog(taskName, prevLog string) error {
-	latest := paths.TaskLogLatest(taskName)
+// different (newer) file. Pass an empty string when the job has never run.
+func waitAndFollowLog(jobName, prevLog string) error {
+	latest := paths.JobLogLatest(jobName)
 	deadline := time.Now().Add(30 * time.Second)
-	fmt.Printf("Waiting for task %q to start", taskName)
+	fmt.Printf("Waiting for job %q to start", jobName)
 	for time.Now().Before(deadline) {
 		if target, err := os.Readlink(latest); err == nil && target != prevLog {
 			break
@@ -81,17 +81,17 @@ func NewLogsCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:               "logs <name>",
-		Short:             "Show run logs for a task",
+		Short:             "Show run logs for a job",
 		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeJobNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
-			logDir := paths.TaskLogDir(name)
+			logDir := paths.JobLogDir(name)
 
 			entries, err := os.ReadDir(logDir)
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					return fmt.Errorf("no logs found for task %q", name)
+					return fmt.Errorf("no logs found for job %q", name)
 				}
 				return err
 			}
@@ -105,7 +105,7 @@ func NewLogsCmd() *cobra.Command {
 			sort.Strings(logs)
 
 			if len(logs) == 0 {
-				return fmt.Errorf("no runs found for task %q", name)
+				return fmt.Errorf("no runs found for job %q", name)
 			}
 
 			if list {
@@ -130,7 +130,7 @@ func NewLogsCmd() *cobra.Command {
 			}
 
 			// Open the latest log.
-			latest := paths.TaskLogLatest(name)
+			latest := paths.JobLogLatest(name)
 			f, err := os.Open(latest)
 			if err != nil {
 				return fmt.Errorf("opening latest log: %w", err)

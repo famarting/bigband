@@ -13,7 +13,7 @@ import (
 func NewWorktreeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "worktree",
-		Short: "Manage git worktrees created by task runs",
+		Short: "Manage git worktrees created by job runs",
 	}
 	cmd.AddCommand(
 		newWorktreeMoveCmd(),
@@ -24,30 +24,30 @@ func NewWorktreeCmd() *cobra.Command {
 
 func newWorktreeMoveCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:               "move <task> <dest>",
-		Short:             "Move a task's worktree to a new location",
+		Use:               "move <job> <dest>",
+		Short:             "Move a job's worktree to a new location",
 		Args:              cobra.ExactArgs(2),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeJobNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			taskName, dest := args[0], args[1]
+			jobName, dest := args[0], args[1]
 
 			st, err := state.Load()
 			if err != nil {
 				return err
 			}
-			ts := st.Get(taskName)
-			if ts.WorktreePath == "" {
-				return fmt.Errorf("no tracked worktree for task %q", taskName)
+			js := st.Get(jobName)
+			if js.WorktreePath == "" {
+				return fmt.Errorf("no tracked worktree for job %q", jobName)
 			}
 
-			folder := ts.Folder
+			folder := js.Folder
 			if cfg, err := config.Load(paths.Config()); err == nil {
-				if t := cfg.TaskByName(taskName); t != nil {
-					folder = t.Folder
+				if j := cfg.JobByName(jobName); j != nil {
+					folder = j.Folder
 				}
 			}
 			if folder == "" {
-				return fmt.Errorf("task %q: no folder recorded — cannot resolve repo root", taskName)
+				return fmt.Errorf("job %q: no folder recorded — cannot resolve repo root", jobName)
 			}
 
 			repoRoot, err := worktree.RepoRoot(folder)
@@ -55,15 +55,15 @@ func newWorktreeMoveCmd() *cobra.Command {
 				return err
 			}
 
-			if err := worktree.Move(repoRoot, ts.WorktreePath, dest); err != nil {
+			if err := worktree.Move(repoRoot, js.WorktreePath, dest); err != nil {
 				return err
 			}
 
-			if err := st.SetWorktreePath(taskName, dest); err != nil {
+			if err := st.SetWorktreePath(jobName, dest); err != nil {
 				return fmt.Errorf("moved worktree but failed to update state: %w", err)
 			}
 
-			fmt.Printf("moved %s → %s\n", ts.WorktreePath, dest)
+			fmt.Printf("moved %s → %s\n", js.WorktreePath, dest)
 			return nil
 		},
 	}
@@ -71,30 +71,30 @@ func newWorktreeMoveCmd() *cobra.Command {
 
 func newWorktreeRmCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:               "rm <task>",
-		Short:             "Remove a task's tracked worktree",
+		Use:               "rm <job>",
+		Short:             "Remove a job's tracked worktree",
 		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeJobNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			taskName := args[0]
+			jobName := args[0]
 
 			st, err := state.Load()
 			if err != nil {
 				return err
 			}
-			ts := st.Get(taskName)
-			if ts.WorktreePath == "" {
-				return fmt.Errorf("no tracked worktree for task %q", taskName)
+			js := st.Get(jobName)
+			if js.WorktreePath == "" {
+				return fmt.Errorf("no tracked worktree for job %q", jobName)
 			}
 
-			folder := ts.Folder
+			folder := js.Folder
 			if cfg, err := config.Load(paths.Config()); err == nil {
-				if t := cfg.TaskByName(taskName); t != nil {
-					folder = t.Folder
+				if j := cfg.JobByName(jobName); j != nil {
+					folder = j.Folder
 				}
 			}
 			if folder == "" {
-				return fmt.Errorf("task %q: no folder recorded — cannot resolve repo root", taskName)
+				return fmt.Errorf("job %q: no folder recorded — cannot resolve repo root", jobName)
 			}
 
 			repoRoot, err := worktree.RepoRoot(folder)
@@ -102,15 +102,15 @@ func newWorktreeRmCmd() *cobra.Command {
 				return err
 			}
 
-			if err := worktree.Remove(repoRoot, ts.WorktreePath); err != nil {
+			if err := worktree.Remove(repoRoot, js.WorktreePath); err != nil {
 				return err
 			}
 
-			if err := st.SetWorktreePath(taskName, ""); err != nil {
+			if err := st.SetWorktreePath(jobName, ""); err != nil {
 				return fmt.Errorf("removed worktree but failed to update state: %w", err)
 			}
 
-			fmt.Printf("removed %s\n", ts.WorktreePath)
+			fmt.Printf("removed %s\n", js.WorktreePath)
 			return nil
 		},
 	}

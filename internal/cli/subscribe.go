@@ -19,7 +19,7 @@ import (
 func NewSubscribeCmd() *cobra.Command {
 	var (
 		types []string
-		tasks []string
+		jobs  []string
 		name  string
 		since string
 	)
@@ -36,7 +36,7 @@ func NewSubscribeCmd() *cobra.Command {
 			req := &ipc.SubscribeRequest{
 				Name:  name,
 				Types: types,
-				Tasks: tasks,
+				Jobs:  jobs,
 				Since: since,
 			}
 			if err := json.NewEncoder(conn).Encode(ipc.Cmd{Action: "subscribe", Subscribe: req}); err != nil {
@@ -68,7 +68,7 @@ func NewSubscribeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVar(&types, "types", nil, "filter by event type (repeatable; empty = all)")
-	cmd.Flags().StringSliceVar(&tasks, "tasks", nil, "filter by task name or '*' (repeatable; empty = all)")
+	cmd.Flags().StringSliceVar(&jobs, "jobs", nil, "filter by job name or '*' (repeatable; empty = all)")
 	cmd.Flags().StringVar(&name, "name", "cli:subscribe", "subscriber name reported to the daemon")
 	cmd.Flags().StringVar(&since, "since", "", "RFC3339 timestamp; replay events from events.jsonl from this point before going live")
 	return cmd

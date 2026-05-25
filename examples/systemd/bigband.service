@@ -9,7 +9,7 @@ ExecStart=%h/.local/bin/bigband daemon
 Restart=on-failure
 RestartSec=5
 
-# bigband writes its own log to ~/.bigband-tasks/daemon.log; journald gets a copy too.
+# bigband writes its own log to ~/.bigband/daemon.log; journald gets a copy too.
 StandardOutput=journal
 StandardError=journal
 

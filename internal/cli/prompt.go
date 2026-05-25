@@ -10,7 +10,7 @@ import (
 	"github.com/famarting/bigband/internal/paths"
 )
 
-// askName prompts for a task/template name, slugifies it, and asks the user to
+// askName prompts for a job/template name, slugifies it, and asks the user to
 // confirm a corrected slug if it differs from the input. Returns the validated
 // name (matching config.IsValidName) or an error.
 func askName(r *bufio.Reader, label string) (string, error) {
@@ -62,7 +62,7 @@ func normalizeName(raw string) (string, error) {
 	return slug, nil
 }
 
-// validateUniqueName returns an error if the name already exists as a task or
+// validateUniqueName returns an error if the name already exists as a job or
 // template in the loaded config (used to fail fast before writing YAML).
 func validateUniqueName(name string) error {
 	cfg, err := config.Load(paths.Config())
@@ -70,8 +70,8 @@ func validateUniqueName(name string) error {
 		// If the config doesn't load yet (e.g. first run), skip the check.
 		return nil
 	}
-	if cfg.TaskByName(name) != nil {
-		return fmt.Errorf("a task named %q already exists", name)
+	if cfg.JobByName(name) != nil {
+		return fmt.Errorf("a job named %q already exists", name)
 	}
 	if cfg.TemplateByName(name) != nil {
 		return fmt.Errorf("a template named %q already exists", name)

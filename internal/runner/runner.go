@@ -1,4 +1,4 @@
-// Package runner executes a single bigband task: pre-exec → agent → post-exec.
+// Package runner executes a single bigband job: pre-exec → agent → post-exec.
 //
 // The "agent" step is delegated to an agent.Agent implementation (Claude Code
 // by default; other providers register themselves via blank imports in main).
@@ -31,103 +31,122 @@ import (
 	"github.com/famarting/bigband/internal/worktree"
 )
 
-// Run executes the task pipeline in the caller's goroutine. It is intended to
+// Run executes the job pipeline in the caller's goroutine. It is intended to
 // be called from a goroutine (e.g. the cron handler).
 // out receives a live copy of all output in addition to the log file;
 // pass io.Discard when live streaming is not needed.
 // pub receives lifecycle events; pass events.NopPublisher{} to disable.
 // Cancelling ctx terminates any in-progress shell command or Claude invocation.
-func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.State, out io.Writer, pub events.Publisher) {
+func Run(ctx context.Context, cfg *config.Config, job *config.Job, st *state.State, out io.Writer, pub events.Publisher) {
 	if pub == nil {
 		pub = events.NopPublisher{}
 	}
-	jitter := task.JitterDuration()
+	jitter := job.JitterDuration()
 	if jitter > 0 {
 		sleep := time.Duration(rand.Int63n(int64(jitter)))
-		fmt.Fprintf(out, "[%s] sleeping for %s before starting (jitter)\n", task.Name, sleep.Round(time.Second))
+		fmt.Fprintf(out, "[%s] sleeping for %s before starting (jitter)\n", job.Name, sleep.Round(time.Second))
 		select {
 		case <-time.After(sleep):
 		case <-ctx.Done():
-			log.Printf("bigband: task %q cancelled during jitter sleep — not started", task.Name)
+			log.Printf("bigband: job %q cancelled during jitter sleep — not started", job.Name)
 			return
 		}
 	}
 
-	release, acquired := state.Lock(task.Name)
+	release, acquired := state.Lock(job.Name)
 	if !acquired {
-		fmt.Fprintf(out, "[%s] skipped — previous run still active\n", task.Name)
+		fmt.Fprintf(out, "[%s] skipped — previous run still active\n", job.Name)
 		return
 	}
 	defer release()
 
-	ts := task.RunTimestamp
+	ts := job.RunTimestamp
 	if ts == "" {
 		ts = time.Now().UTC().Format("2006-01-02T15-04-05Z")
 	}
-	logPath, lf, err := openLog(task.Name, ts)
+	logPath, lf, err := openLog(job.Name, ts)
 	if err != nil {
-		fmt.Fprintf(out, "[%s] cannot open log file: %v\n", task.Name, err)
+		fmt.Fprintf(out, "[%s] cannot open log file: %v\n", job.Name, err)
 		return
 	}
 	defer lf.Close()
 
 	w := io.MultiWriter(lf, out)
-	logger := log.New(w, fmt.Sprintf("[%s] ", task.Name), log.LstdFlags)
+	logger := log.New(w, fmt.Sprintf("[%s] ", job.Name), log.LstdFlags)
 	started := time.Now()
 
-	if err := st.SetRunning(task.Name, os.Getpid(), task.Folder); err != nil {
+	if err := st.SetRunning(job.Name, os.Getpid(), job.Folder); err != nil {
+		logger.Printf("WARNING: state update failed: %v", err)
+	}
+	// Snapshot the run's input parameters into state so `bigband rerun` can
+	// reproduce the invocation later — critical for ephemeral submits, whose
+	// prompt would otherwise only live in the (prunable) log file.
+	timeoutStr := ""
+	if job.Timeout != nil {
+		timeoutStr = job.Timeout.String()
+	}
+	if err := st.SetJobParams(job.Name, state.JobParams{
+		Prompt:   job.Prompt,
+		PreExec:  job.PreExec,
+		PostExec: job.PostExec,
+		Worktree: job.Worktree,
+		Timeout:  timeoutStr,
+		Model:    job.Model,
+		Effort:   job.Effort,
+		Agent:    job.Agent,
+	}); err != nil {
 		logger.Printf("WARNING: state update failed: %v", err)
 	}
 
-	logger.Printf("=== START task=%s folder=%s log=%s", task.Name, task.Folder, logPath)
-	logger.Printf("  schedule: %s", task.Schedule)
-	logger.Printf("  prompt:   %s", strings.TrimSpace(task.Prompt))
+	logger.Printf("=== START job=%s folder=%s log=%s", job.Name, job.Folder, logPath)
+	logger.Printf("  schedule: %s", job.Schedule)
+	logger.Printf("  prompt:   %s", strings.TrimSpace(job.Prompt))
 
-	// runID is task-name + log timestamp. Stable per run, used to correlate
+	// runID is job-name + log timestamp. Stable per run, used to correlate
 	// every event for this run.
-	runID := task.Name + "/" + filepath.Base(strings.TrimSuffix(logPath, ".log"))
+	runID := job.Name + "/" + filepath.Base(strings.TrimSuffix(logPath, ".log"))
 	pub.Publish(events.Envelope{
-		Type:        events.TypeTaskRunStarted,
+		Type:        events.TypeJobRunStarted,
 		RunID:       runID,
-		TaskName:    task.Name,
-		TriggeredBy: task.TriggeredBy,
-		Data: events.MustData(events.TaskRunStartedData{
-			Folder:     task.Folder,
-			Schedule:   task.Schedule,
-			OneOff:     task.IsOneOff(),
-			Worktree:   task.ShouldUseWorktree(),
-			Resume:     task.ResumeSessionID != "",
-			ResumeFrom: task.ResumeSessionID,
-			Ephemeral:  task.Ephemeral,
+		JobName:     job.Name,
+		TriggeredBy: job.TriggeredBy,
+		Data: events.MustData(events.JobRunStartedData{
+			Folder:     job.Folder,
+			Schedule:   job.Schedule,
+			OneOff:     job.IsOneOff(),
+			Worktree:   job.ShouldUseWorktree(),
+			Resume:     job.ResumeSessionID != "",
+			ResumeFrom: job.ResumeSessionID,
+			Ephemeral:  job.Ephemeral,
 		}),
 	})
 
 	// Declare all variables before any goto so the compiler is happy.
 	var (
-		status      = state.StatusOK
-		repoRoot    string
-		wtPath      string
-		runDir      = task.Folder // updated after worktree creation; fallback is original folder
-		sessionID   string
-		finalMsg    string // last non-empty assistant text from the final turn
-		replyPath   string // sidecar file holding finalMsg, written before post_exec
-		taskTimeout = cfg.EffectiveTimeout(task)
+		status     = state.StatusOK
+		repoRoot   string
+		wtPath     string
+		runDir     = job.Folder // updated after worktree creation; fallback is original folder
+		sessionID  string
+		finalMsg   string // last non-empty assistant text from the final turn
+		replyPath  string // sidecar file holding finalMsg, written before post_exec
+		jobTimeout = cfg.EffectiveTimeout(job)
 	)
 
 	// Pre-exec runs in the original folder so that commands like "git pull"
 	// update the main-branch repo before the worktree is created from HEAD.
-	if len(task.PreExec) > 0 {
+	if len(job.PreExec) > 0 {
 		logger.Println("--- pre_exec ---")
 	}
-	for _, cmd := range task.PreExec {
-		if err := runShell(ctx, cfg, cmd, task.Folder, w, taskTimeout); err != nil {
+	for _, cmd := range job.PreExec {
+		if err := runShell(ctx, cfg, cmd, job.Folder, w, jobTimeout); err != nil {
 			logger.Printf("pre_exec failed: %v", err)
 			status = state.StatusPreFailed
 			pub.Publish(events.Envelope{
-				Type:     events.TypeTaskRunPreFailed,
-				RunID:    runID,
-				TaskName: task.Name,
-				Data: events.MustData(events.TaskRunPreFailedData{
+				Type:    events.TypeJobRunPreFailed,
+				RunID:   runID,
+				JobName: job.Name,
+				Data: events.MustData(events.JobRunPreFailedData{
 					Command: cmd,
 					Error:   err.Error(),
 				}),
@@ -138,13 +157,13 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 
 	// Worktree is created after pre_exec, so any "git pull" has already run
 	// and HEAD is up-to-date before we snapshot it into the worktree.
-	runDir, repoRoot, wtPath = resolveRunDir(task, w, logger, st)
+	runDir, repoRoot, wtPath = resolveRunDir(job, w, logger, st)
 	if wtPath != "" {
 		pub.Publish(events.Envelope{
-			Type:     events.TypeTaskRunWorktreeReady,
-			RunID:    runID,
-			TaskName: task.Name,
-			Data: events.MustData(events.TaskRunWorktreeReadyData{
+			Type:    events.TypeJobRunWorktreeReady,
+			RunID:   runID,
+			JobName: job.Name,
+			Data: events.MustData(events.JobRunWorktreeReadyData{
 				WorktreePath: wtPath,
 				RunDir:       runDir,
 			}),
@@ -155,7 +174,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 	// (e.g. Claude's ScheduleWakeup tool). Providers that don't self-reschedule
 	// return Wakeup=nil and the loop exits after one iteration.
 	{
-		agentName := cfg.EffectiveAgent(task)
+		agentName := cfg.EffectiveAgent(job)
 		ag, agErr := agent.Get(agentName)
 		if agErr != nil {
 			logger.Printf("agent lookup failed: %v", agErr)
@@ -164,7 +183,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		}
 		logger.Printf("--- %s ---", ag.Name())
 
-		timeout := cfg.EffectiveTimeout(task)
+		timeout := cfg.EffectiveTimeout(job)
 		deadline := time.Now().Add(timeout)
 		// One overall deadline bounds every turn (initial + wakeups), so each
 		// agent.Run inherits whatever time is left. The provider does not
@@ -174,16 +193,16 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 
 		baseReq := agent.Request{
 			WorkDir:    runDir,
-			Model:      cfg.EffectiveModel(task),
-			Effort:     cfg.EffectiveEffort(task),
-			ExtraFlags: task.ExtraClaudeFlags,
+			Model:      cfg.EffectiveModel(job),
+			Effort:     cfg.EffectiveEffort(job),
+			ExtraFlags: job.ExtraClaudeFlags,
 			LogWriter:  lf,
 			Live:       out,
 		}
 
-		// task.ResumeSessionID is set by IPC submit for follow-up runs that
+		// job.ResumeSessionID is set by IPC submit for follow-up runs that
 		// continue a previous agent session. Empty for normal scheduled runs.
-		initialResume := task.ResumeSessionID
+		initialResume := job.ResumeSessionID
 		if initialResume != "" {
 			logger.Printf("resuming session %s", initialResume)
 		}
@@ -194,18 +213,18 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 				return
 			}
 			pub.Publish(events.Envelope{
-				Type:     events.TypeClaudeSessionStarted,
-				RunID:    runID,
-				TaskName: task.Name,
-				Data:     events.MustData(events.ClaudeSessionStartedData{SessionID: sessionID}),
+				Type:    events.TypeClaudeSessionStarted,
+				RunID:   runID,
+				JobName: job.Name,
+				Data:    events.MustData(events.ClaudeSessionStartedData{SessionID: sessionID}),
 			})
 			sessionAnnounced = true
 		}
 		emitTurn := func(msg string) {
 			pub.Publish(events.Envelope{
-				Type:     events.TypeClaudeTurnCompleted,
-				RunID:    runID,
-				TaskName: task.Name,
+				Type:    events.TypeClaudeTurnCompleted,
+				RunID:   runID,
+				JobName: job.Name,
 				Data: events.MustData(events.ClaudeTurnCompletedData{
 					FinalMessage: msg,
 					SessionID:    sessionID,
@@ -214,7 +233,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		}
 
 		req := baseReq
-		req.Prompt = task.Prompt
+		req.Prompt = job.Prompt
 		req.ResumeSessionID = initialResume
 		res, runErr := ag.Run(agentCtx, req)
 		if res.SessionID != "" {
@@ -230,24 +249,24 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 
 		for res.Wakeup != nil && runErr == nil {
 			if sessionID != "" {
-				if err2 := st.SetSessionID(task.Name, sessionID); err2 != nil {
+				if err2 := st.SetSessionID(job.Name, sessionID); err2 != nil {
 					logger.Printf("WARNING: state update failed: %v", err2)
 				}
 			}
 			delay := res.Wakeup.Delay
 			remaining := time.Until(deadline)
 			if delay >= remaining {
-				logger.Printf("scheduled wakeup in %s would exceed task timeout — stopping", delay.Round(time.Second))
+				logger.Printf("scheduled wakeup in %s would exceed job timeout — stopping", delay.Round(time.Second))
 				break
 			}
 			resumePrompt := res.Wakeup.Prompt
 			if resumePrompt == "" || resumePrompt == "<<autonomous-loop-dynamic>>" {
-				resumePrompt = task.Prompt
+				resumePrompt = job.Prompt
 			}
 			pub.Publish(events.Envelope{
-				Type:     events.TypeClaudeWakeup,
-				RunID:    runID,
-				TaskName: task.Name,
+				Type:    events.TypeClaudeWakeup,
+				RunID:   runID,
+				JobName: job.Name,
 				Data: events.MustData(events.ClaudeWakeupData{
 					DelaySeconds: int(delay / time.Second),
 					Prompt:       resumePrompt,
@@ -279,7 +298,7 @@ func Run(ctx context.Context, cfg *config.Config, task *config.Task, st *state.S
 		}
 
 		if sessionID != "" {
-			if err := st.SetSessionID(task.Name, sessionID); err != nil {
+			if err := st.SetSessionID(job.Name, sessionID); err != nil {
 				logger.Printf("WARNING: state update failed: %v", err)
 			}
 		}
@@ -310,35 +329,35 @@ postExec:
 	}
 
 	// Post-exec runs in runDir (worktree when available) so it can inspect or
-	// commit whatever the agent produced. Falls back to task.Folder if no
+	// commit whatever the agent produced. Falls back to job.Folder if no
 	// worktree.
-	if len(task.PostExec) > 0 {
+	if len(job.PostExec) > 0 {
 		logger.Println("--- post_exec ---")
 	}
 	env := []string{
 		"BIGBAND_STATUS=" + string(status),
 		"BIGBAND_LOG=" + logPath,
-		"BIGBAND_TASK=" + task.Name,
+		"BIGBAND_JOB=" + job.Name,
 		"BIGBAND_WORKTREE=" + wtPath,
 		"BIGBAND_REPLY_FILE=" + replyPath,
 		"BIGBAND_SESSION_ID=" + sessionID,
 	}
-	for _, cmd := range task.PostExec {
-		if err := runShellWithEnv(ctx, cfg, cmd, runDir, w, taskTimeout, env); err != nil {
+	for _, cmd := range job.PostExec {
+		if err := runShellWithEnv(ctx, cfg, cmd, runDir, w, jobTimeout, env); err != nil {
 			logger.Printf("post_exec error: %v", err)
 		}
 	}
 
 	// Worktree cleanup.
 	if wtPath != "" {
-		if task.ShouldKeepWorktree() {
+		if job.ShouldKeepWorktree() {
 			logger.Printf("keeping worktree %s", wtPath)
 		} else {
 			if err := worktree.Remove(repoRoot, wtPath); err != nil {
 				logger.Printf("WARNING: failed to remove worktree %s: %v", wtPath, err)
 			} else {
 				logger.Printf("removed worktree %s", wtPath)
-				_ = st.SetWorktreePath(task.Name, "")
+				_ = st.SetWorktreePath(job.Name, "")
 			}
 		}
 	}
@@ -346,61 +365,61 @@ postExec:
 	dur := time.Since(started)
 	logger.Printf("=== END status=%s duration=%s", status, dur.Round(time.Second))
 
-	if err := st.SetDone(task.Name, status, dur, logPath, replyPath); err != nil {
+	if err := st.SetDone(job.Name, status, dur, logPath, replyPath); err != nil {
 		logger.Printf("WARNING: state update failed: %v", err)
 	}
 
 	pub.Publish(events.Envelope{
-		Type:        events.TypeTaskRunCompleted,
+		Type:        events.TypeJobRunCompleted,
 		RunID:       runID,
-		TaskName:    task.Name,
-		TriggeredBy: task.TriggeredBy,
-		Data: events.MustData(events.TaskRunCompletedData{
+		JobName:     job.Name,
+		TriggeredBy: job.TriggeredBy,
+		Data: events.MustData(events.JobRunCompletedData{
 			Status:       string(status),
 			FinalMessage: finalMsg,
 			LogPath:      logPath,
 			ReplyFile:    replyPath,
 			SessionID:    sessionID,
-			Folder:       task.Folder,
+			Folder:       job.Folder,
 			WorktreePath: wtPath,
 			DurationMS:   dur.Milliseconds(),
 		}),
 	})
 
-	trimLogs(task.Name, cfg.Defaults.RetainLogs)
+	trimLogs(job.Name, cfg.Defaults.RetainLogs)
 }
 
-// resolveRunDir creates a git worktree for the task and returns:
+// resolveRunDir creates a git worktree for the job and returns:
 //   - runDir: where pre_exec / claude / post_exec should run
 //   - repoRoot: the repo root (needed for later worktree removal)
 //   - wtPath: the worktree path (empty if no worktree was created)
 //
-// On any failure it falls back gracefully to task.Folder.
-func resolveRunDir(task *config.Task, w io.Writer, logger *log.Logger, st *state.State) (runDir, repoRoot, wtPath string) {
-	runDir = task.Folder
-	if !task.ShouldUseWorktree() {
-		logger.Printf("NOTE: worktree disabled — running in original folder %s", task.Folder)
+// On any failure it falls back gracefully to job.Folder.
+func resolveRunDir(job *config.Job, w io.Writer, logger *log.Logger, st *state.State) (runDir, repoRoot, wtPath string) {
+	runDir = job.Folder
+	if !job.ShouldUseWorktree() {
+		logger.Printf("NOTE: worktree disabled — running in original folder %s", job.Folder)
 		return
 	}
-	root, err := worktree.RepoRoot(task.Folder)
+	root, err := worktree.RepoRoot(job.Folder)
 	if err != nil {
 		logger.Printf("NOTE: skipping worktree — %v", err)
 		return
 	}
 	repoRoot = root
 
-	wt := worktree.DefaultPath(repoRoot, task.Name)
+	wt := worktree.DefaultPath(repoRoot, job.Name)
 
 	// With reuse_worktree, skip re-creation if the worktree already exists so
 	// that Claude picks up whatever state the previous run left behind.
-	if task.ShouldReuseWorktree() {
+	if job.ShouldReuseWorktree() {
 		if _, err := os.Stat(wt); err == nil {
-			dir := worktree.SubDir(repoRoot, wt, task.Folder)
+			dir := worktree.SubDir(repoRoot, wt, job.Folder)
 			if _, err := os.Stat(dir); err == nil {
 				wtPath = wt
 				runDir = dir
 				logger.Printf("reusing existing worktree %s", wtPath)
-				if err := st.SetWorktreeKept(task.Name, wtPath, task.ShouldKeepWorktree()); err != nil {
+				if err := st.SetWorktreeKept(job.Name, wtPath, job.ShouldKeepWorktree()); err != nil {
 					logger.Printf("WARNING: state update failed: %v", err)
 				}
 				return
@@ -410,12 +429,12 @@ func resolveRunDir(task *config.Task, w io.Writer, logger *log.Logger, st *state
 		// to CreateOrReplace to build it fresh.
 	}
 
-	if err := worktree.CreateOrReplace(repoRoot, wt, task.Name, w); err != nil {
+	if err := worktree.CreateOrReplace(repoRoot, wt, job.Name, w); err != nil {
 		logger.Printf("WARNING: worktree creation failed: %v — running in original folder", err)
 		return
 	}
 
-	dir := worktree.SubDir(repoRoot, wt, task.Folder)
+	dir := worktree.SubDir(repoRoot, wt, job.Folder)
 	if _, err := os.Stat(dir); err != nil {
 		logger.Printf("WARNING: worktree subdir %s missing — running in original folder", dir)
 		_ = worktree.Remove(repoRoot, wt)
@@ -425,28 +444,28 @@ func resolveRunDir(task *config.Task, w io.Writer, logger *log.Logger, st *state
 	wtPath = wt
 	runDir = dir
 	logger.Printf("created worktree %s", wtPath)
-	if err := st.SetWorktreeKept(task.Name, wtPath, task.ShouldKeepWorktree()); err != nil {
+	if err := st.SetWorktreeKept(job.Name, wtPath, job.ShouldKeepWorktree()); err != nil {
 		logger.Printf("WARNING: state update failed: %v", err)
 	}
 	return
 }
 
-func openLog(taskName, ts string) (string, *os.File, error) {
-	dir := paths.TaskLogDir(taskName)
+func openLog(jobName, ts string) (string, *os.File, error) {
+	dir := paths.JobLogDir(jobName)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", nil, err
 	}
 	logPath := filepath.Join(dir, ts+".log")
 	// 0600 explicitly: log files contain Claude's full output (prompts,
 	// tool I/O, final messages) and could legitimately include secrets the
-	// task was asked to handle. Defense-in-depth alongside the 0700 dir.
+	// job was asked to handle. Defense-in-depth alongside the 0700 dir.
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return "", nil, err
 	}
 	// Update latest symlink atomically: create a tmp symlink then rename
 	// over the old one so readers never see a missing target.
-	latest := paths.TaskLogLatest(taskName)
+	latest := paths.JobLogLatest(jobName)
 	tmp := latest + ".tmp"
 	if err := os.Symlink(logPath, tmp); err == nil {
 		_ = os.Rename(tmp, latest)
@@ -473,11 +492,11 @@ func runShellWithEnv(ctx context.Context, cfg *config.Config, cmd, dir string, w
 	return c.Run()
 }
 
-func trimLogs(taskName string, retain int) {
+func trimLogs(jobName string, retain int) {
 	if retain <= 0 {
 		return
 	}
-	dir := paths.TaskLogDir(taskName)
+	dir := paths.JobLogDir(jobName)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return

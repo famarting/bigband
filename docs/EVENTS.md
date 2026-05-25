@@ -1,19 +1,17 @@
-# Events reference (schema v2)
+# Events reference (schema v3)
 
-Every lifecycle event the bigband daemon emits is wrapped in the same envelope and written to `~/.bigband-tasks/events.jsonl` as well as fanned out to active `subscribe` IPC subscribers.
-
-**v2** added the `extension.*` types alongside the unchanged v1 task types. Subscribers ignoring unknown types continue to work; consumers that decode strictly should bump to v2.
+Every lifecycle event the bigband daemon emits is wrapped in the same envelope and written to `~/.bigband/events.jsonl` as well as fanned out to active `subscribe` IPC subscribers.
 
 ## Envelope
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "event_id": "8 bytes hex",
   "type": "<one of the types below>",
   "occurred_at": "RFC3339 UTC timestamp",
-  "run_id": "<task_name>/<iso-timestamp>",
-  "task_name": "<configured or oneoff-...>",
+  "run_id": "<job_name>/<iso-timestamp>",
+  "job_name": "<configured or oneoff-...>",
   "source": "scheduler | ipc | cli | daemon",
   "triggered_by": "<free-form label, e.g. slack:thread:1234>",
   "data": { /* type-specific payload */ }
@@ -26,13 +24,13 @@ Only `schema_version`, `event_id`, `type`, and `occurred_at` are guaranteed popu
 
 | Type | Source struct (Go) | When |
 |---|---|---|
-| `task_run.started` | `bigbandext.TaskRunStartedData` | After lock acquisition, before pre_exec |
-| `task_run.worktree_ready` | `bigbandext.TaskRunWorktreeReadyData` | After worktree creation/reuse succeeds |
+| `job_run.started` | `bigbandext.JobRunStartedData` | After lock acquisition, before pre_exec |
+| `job_run.worktree_ready` | `bigbandext.JobRunWorktreeReadyData` | After worktree creation/reuse succeeds |
 | `claude.session_started` | `bigbandext.ClaudeSessionStartedData` | First time a Claude session id is captured for the run |
 | `claude.turn_completed` | `bigbandext.ClaudeTurnCompletedData` | Each `claude` invocation returns (one per ScheduleWakeup loop iteration) |
 | `claude.scheduled_wakeup` | `bigbandext.ClaudeWakeupData` | Claude requested a delayed resume; bigband is about to sleep |
-| `task_run.completed` | `bigbandext.TaskRunCompletedData` | End of `runner.Run`, after post_exec and worktree cleanup |
-| `task_run.failed_pre_exec` | `bigbandext.TaskRunPreFailedData` | Pre_exec command failed; run skips the claude block and goes to post_exec |
+| `job_run.completed` | `bigbandext.JobRunCompletedData` | End of `runner.Run`, after post_exec and worktree cleanup |
+| `job_run.failed_pre_exec` | `bigbandext.JobRunPreFailedData` | Pre_exec command failed; run skips the claude block and goes to post_exec |
 | `subscriber.lagged` | (no data) | A subscriber's buffer overflowed and missed events; resync from `events.jsonl` |
 | `extension.started` | `bigbandext.ExtensionStartedData` | Supervisor spawned an extension's child process |
 | `extension.exited` | `bigbandext.ExtensionExitedData` | An extension's child process exited (cleanly or otherwise) |
@@ -44,7 +42,7 @@ Adding a new type bumps `schema_version`. Removing or renaming requires a major 
 
 ## Payloads
 
-### `task_run.started`
+### `job_run.started`
 ```json
 {
   "folder": "/path/to/run-dir",
@@ -57,7 +55,7 @@ Adding a new type bumps `schema_version`. Removing or renaming requires a major 
 }
 ```
 
-### `task_run.worktree_ready`
+### `job_run.worktree_ready`
 ```json
 {
   "worktree_path": "/path/to/worktree",
@@ -87,13 +85,13 @@ Adding a new type bumps `schema_version`. Removing or renaming requires a major 
 { "delay_seconds": 1800, "prompt": "<<autonomous-loop-dynamic>>" }
 ```
 
-### `task_run.completed`
+### `job_run.completed`
 ```json
 {
   "status": "ok",
   "final_message": "Done. PR is at https://...",
-  "log_path": "/Users/me/.bigband-tasks/logs/morning-brief/2026-05-09T15-00-00Z.log",
-  "reply_file": "/Users/me/.bigband-tasks/logs/morning-brief/2026-05-09T15-00-00Z.reply.txt",
+  "log_path": "/Users/me/.bigband/logs/morning-brief/2026-05-09T15-00-00Z.log",
+  "reply_file": "/Users/me/.bigband/logs/morning-brief/2026-05-09T15-00-00Z.reply.txt",
   "session_id": "claude-session-abc-123",
   "folder": "/Users/me/work/projects/cloudgrid",
   "worktree_path": "/path/to/worktree",
@@ -101,9 +99,9 @@ Adding a new type bumps `schema_version`. Removing or renaming requires a major 
 }
 ```
 
-`status` is one of `ok`, `failed`, `timeout`, `pre_failed`, `stopped`, `unknown`. `final_message` is empty when the run ended on a tool call (no closing assistant text). `folder` is the directory the run executed from before any worktree resolution (i.e. `task.Folder`); `worktree_path` is the live worktree if one was created and kept. Together they let an integration follow up on the run without re-querying state — see the slack reference integration in `cmd/bigband-slack/`.
+`status` is one of `ok`, `failed`, `timeout`, `pre_failed`, `stopped`, `unknown`. `final_message` is empty when the run ended on a tool call (no closing assistant text). `folder` is the directory the run executed from before any worktree resolution (i.e. `job.Folder`); `worktree_path` is the live worktree if one was created and kept. Together they let an integration follow up on the run without re-querying state — see the slack reference integration in `cmd/bigband-slack/`.
 
-### `task_run.failed_pre_exec`
+### `job_run.failed_pre_exec`
 ```json
 { "command": "git pull", "error": "exit status 1" }
 ```

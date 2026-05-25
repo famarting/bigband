@@ -38,7 +38,7 @@ func NewClient(socketPath string, dialTimeout time.Duration) *Client {
 }
 
 // NewClientFromEnv resolves the socket path the same way bigband itself does:
-// $BIGBAND_HOME/daemon.sock, falling back to $HOME/.bigband-tasks/daemon.sock.
+// $BIGBAND_HOME/daemon.sock, falling back to $HOME/.bigband/daemon.sock.
 func NewClientFromEnv() (*Client, error) {
 	root := os.Getenv("BIGBAND_HOME")
 	if root == "" {
@@ -46,7 +46,7 @@ func NewClientFromEnv() (*Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("home dir: %w", err)
 		}
-		root = filepath.Join(home, ".bigband-tasks")
+		root = filepath.Join(home, ".bigband")
 	}
 	return NewClient(filepath.Join(root, "daemon.sock"), 0), nil
 }
@@ -55,135 +55,44 @@ func NewClientFromEnv() (*Client, error) {
 // Useful in error messages.
 func (c *Client) SocketPath() string { return c.socketPath }
 
-// --- Wire types (private) ---
-
-// These shadow the daemon's internal/ipc types intentionally: the wire format
-// is the public contract, but we don't import internal/ipc from here.
-// SchemaVersion changes will surface as JSON unmarshal failures or unknown
-// field handling — both detectable in tests.
-
-type cmd struct {
-	Action    string            `json:"action"`
-	Task      string            `json:"task,omitempty"`
-	Submit    *SubmitRunRequest `json:"submit,omitempty"`
-	Subscribe *SubscribeRequest `json:"subscribe,omitempty"`
-}
-
-type reply struct {
-	OK      bool            `json:"ok"`
-	Error   string          `json:"error,omitempty"`
-	Payload json.RawMessage `json:"payload,omitempty"`
-}
-
-// SubmitRunRequest is the payload for Submit / Followup. See cmd/bigband for
-// per-field semantics; the most common forms are:
-//
-//	// Fire-and-forget one-off:
-//	{Folder: "/repo", Prompt: "...", Ephemeral: true}
-//
-//	// Follow-up resuming a previous Claude session:
-//	{Folder: worktreePath, Worktree: ptrFalse, Prompt: "...",
-//	 ParentSessionID: prevSessionID, Ephemeral: true}
-type SubmitRunRequest struct {
-	Name            string   `json:"name,omitempty"`
-	Folder          string   `json:"folder"`
-	Prompt          string   `json:"prompt"`
-	PreExec         []string `json:"pre_exec,omitempty"`
-	PostExec        []string `json:"post_exec,omitempty"`
-	Worktree        *bool    `json:"worktree,omitempty"`
-	KeepWorktree    *bool    `json:"keep_worktree,omitempty"`
-	Timeout         string   `json:"timeout,omitempty"`
-	Model           string   `json:"model,omitempty"`
-	Effort          string   `json:"effort,omitempty"`
-	ParentSessionID string   `json:"parent_session_id,omitempty"`
-	Ephemeral       bool     `json:"ephemeral,omitempty"`
-	TriggeredBy     string   `json:"triggered_by,omitempty"`
-}
-
-// SubmitRunReply is the payload of a successful Submit reply.
-type SubmitRunReply struct {
-	RunID    string `json:"run_id"`
-	TaskName string `json:"task_name"`
-	LogPath  string `json:"log_path,omitempty"`
-}
-
-// SubscribeRequest customises a Subscribe call. Empty fields match everything.
-// Since (RFC3339 timestamp or empty) opts into replay from events.jsonl
-// before transitioning to live; "" disables replay.
-type SubscribeRequest struct {
-	Name  string   `json:"name,omitempty"`
-	Types []string `json:"types,omitempty"`
-	Tasks []string `json:"tasks,omitempty"`
-	Since string   `json:"since,omitempty"`
-}
-
-// TaskStatus is one row of a Status reply.
-type TaskStatus struct {
-	Name         string `json:"name"`
-	Schedule     string `json:"schedule"`
-	Enabled      bool   `json:"enabled"`
-	NextRun      string `json:"next_run"`
-	LastRun      string `json:"last_run,omitempty"`
-	LastStatus   string `json:"last_status,omitempty"`
-	LastDuration string `json:"last_duration,omitempty"`
-	LastLog      string `json:"last_log,omitempty"`
-	WorktreePath string `json:"worktree_path,omitempty"`
-	Folder       string `json:"folder,omitempty"`
-	WorktreeMode string `json:"worktree_mode,omitempty"`
-	Ephemeral    bool   `json:"ephemeral,omitempty"`
-	// SessionID is the Claude session id from the task's most recent run, or
-	// empty when the task has never produced one. Extensions building on top
-	// of a task (e.g. workflow promotion) need this to followup.
-	SessionID string `json:"session_id,omitempty"`
-	// Prompt is the configured prompt body for the task. Populated for
-	// configured tasks only; ephemeral submissions don't retain their prompt.
-	Prompt string `json:"prompt,omitempty"`
-}
-
-// StatusReply is the payload of a successful Status reply.
-type StatusReply struct {
-	Uptime string       `json:"uptime"`
-	Tasks  []TaskStatus `json:"tasks"`
-}
-
 // --- Public methods ---
 
 // Ping returns nil when the daemon is reachable.
 func (c *Client) Ping() error {
-	return c.do(cmd{Action: "ping"}, nil)
+	return c.do(Cmd{Action: "ping"}, nil)
 }
 
-// Status returns the daemon's task list snapshot.
+// Status returns the daemon's job list snapshot.
 func (c *Client) Status() (*StatusReply, error) {
 	var out StatusReply
-	if err := c.do(cmd{Action: "status"}, &out); err != nil {
+	if err := c.do(Cmd{Action: "status"}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-// Run triggers a configured task by name.
-func (c *Client) Run(taskName string) error {
-	return c.do(cmd{Action: "run", Task: taskName}, nil)
+// Run triggers a configured job by name.
+func (c *Client) Run(jobName string) error {
+	return c.do(Cmd{Action: "run", Job: jobName}, nil)
 }
 
-// Stop cancels an in-flight task.
-func (c *Client) Stop(taskName string) error {
-	return c.do(cmd{Action: "stop", Task: taskName}, nil)
+// Stop cancels an in-flight job.
+func (c *Client) Stop(jobName string) error {
+	return c.do(Cmd{Action: "stop", Job: jobName}, nil)
 }
 
-// Forget drops an ephemeral task's state from the daemon's in-memory map.
-// Refused for tasks with a live RunningPID. CLI `bigband prune` and
+// Forget drops an ephemeral job's state from the daemon's in-memory map.
+// Refused for jobs with a live RunningPID. CLI `bigband prune` and
 // `bigband rm` both use this.
-func (c *Client) Forget(taskName string) error {
-	return c.do(cmd{Action: "forget", Task: taskName}, nil)
+func (c *Client) Forget(jobName string) error {
+	return c.do(Cmd{Action: "forget", Job: jobName}, nil)
 }
 
-// Submit fires a one-off run with an inline task definition. Returns the
-// generated run_id and task name (auto-generated when req.Name is blank).
+// Submit fires a one-off run with an inline job definition. Returns the
+// generated run_id and job name (auto-generated when req.Name is blank).
 func (c *Client) Submit(req SubmitRunRequest) (*SubmitRunReply, error) {
 	var out SubmitRunReply
-	if err := c.do(cmd{Action: "submit", Submit: &req}, &out); err != nil {
+	if err := c.do(Cmd{Action: "submit", Submit: &req}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -233,7 +142,7 @@ func (c *Client) Subscribe(ctx context.Context, req SubscribeRequest) (<-chan En
 			_ = conn.Close()
 		}()
 
-		if err := json.NewEncoder(conn).Encode(cmd{Action: "subscribe", Subscribe: &req}); err != nil {
+		if err := json.NewEncoder(conn).Encode(Cmd{Action: "subscribe", Subscribe: &req}); err != nil {
 			errCh <- fmt.Errorf("send subscribe: %w", err)
 			return
 		}
@@ -245,7 +154,7 @@ func (c *Client) Subscribe(ctx context.Context, req SubscribeRequest) (<-chan En
 			errCh <- fmt.Errorf("read ack: %w", err)
 			return
 		}
-		var ack reply
+		var ack Reply
 		if err := json.Unmarshal(line, &ack); err != nil {
 			errCh <- fmt.Errorf("decode ack: %w", err)
 			return
@@ -281,7 +190,7 @@ func (c *Client) Subscribe(ctx context.Context, req SubscribeRequest) (<-chan En
 
 // do sends one request and decodes one reply. payload, when non-nil, receives
 // reply.Payload unmarshaled into the given struct.
-func (c *Client) do(req cmd, payload any) error {
+func (c *Client) do(req Cmd, payload any) error {
 	conn, err := net.DialTimeout("unix", c.socketPath, c.dialTimeout)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", c.socketPath, err)
@@ -290,7 +199,7 @@ func (c *Client) do(req cmd, payload any) error {
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return fmt.Errorf("send: %w", err)
 	}
-	var rep reply
+	var rep Reply
 	if err := json.NewDecoder(conn).Decode(&rep); err != nil {
 		return fmt.Errorf("read reply: %w", err)
 	}

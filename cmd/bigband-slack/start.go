@@ -58,7 +58,7 @@ func newDaemonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			log.Printf("bigband-slack: store loaded runs=%d tasks=%d threads=%d", len(store.Runs), len(store.Tasks), len(store.Threads))
+			log.Printf("bigband-slack: store loaded runs=%d jobs=%d threads=%d", len(store.Runs), len(store.Jobs), len(store.Threads))
 
 			bb, err := bigbandextClientFromEnv()
 			if err != nil {
@@ -105,7 +105,7 @@ func bigbandextClientFromEnv() (*bigbandext.Client, error) {
 }
 
 // watchConfigFile watches the slack config for writes and triggers a reload
-// on each. Mirrors the daemon's fsnotify behaviour for ~/.bigband-tasks/config.yaml.
+// on each. Mirrors the daemon's fsnotify behaviour for ~/.bigband/config.yaml.
 //
 // Editors often rename-or-replace the file rather than writing in place, so
 // we react to Write, Create, and Rename events on the parent directory rather
@@ -185,9 +185,9 @@ func runPruneLoop(ctx context.Context, store *Store, retention time.Duration) {
 		return
 	}
 	prune := func() {
-		runs, tasks, threads := store.Prune(time.Now().Add(-retention))
-		if runs+tasks+threads > 0 {
-			log.Printf("bigband-slack: pruned runs=%d tasks=%d threads=%d (retention %s)", runs, tasks, threads, retention)
+		runs, jobs, threads := store.Prune(time.Now().Add(-retention))
+		if runs+jobs+threads > 0 {
+			log.Printf("bigband-slack: pruned runs=%d jobs=%d threads=%d (retention %s)", runs, jobs, threads, retention)
 		}
 	}
 	prune()
@@ -242,8 +242,8 @@ func streamOnce(ctx context.Context, router *Router, st *subscribeState) error {
 		Name: "bigband-slack",
 		Types: []string{
 			string(bigbandext.TypeClaudeSessionStarted),
-			string(bigbandext.TypeTaskRunWorktreeReady),
-			string(bigbandext.TypeTaskRunCompleted),
+			string(bigbandext.TypeJobRunWorktreeReady),
+			string(bigbandext.TypeJobRunCompleted),
 		},
 	}
 	if !st.lastSeen.IsZero() {

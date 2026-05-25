@@ -1,7 +1,7 @@
 # bigband-notify (bash) — extension manifest.
 #
 # To install:
-#   1. Copy this whole directory under ~/.bigband-tasks/extensions/notify-sh/
+#   1. Copy this whole directory under ~/.bigband/extensions/notify-sh/
 #      (or symlink it for in-place editing during dev).
 #   2. Edit `command` to the absolute path of notify.sh on your machine.
 #   3. Tweak `env.NOTIFY_*` to taste.
@@ -11,14 +11,14 @@
 # Logs:     bigband ext logs notify-sh -f
 
 name: notify-sh
-description: "macOS Notification Center banners on task_run.completed (bash)"
+description: "macOS Notification Center banners on job_run.completed (bash)"
 command:
     - /bin/bash
     - notify.sh # resolved against working_dir (manifest's parent)
 env:
     # NOTE: include $HOME/bin if that's where you installed bigband (default for `make install`)
     PATH: ${env:HOME}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
-    NOTIFY_TASKS: "*"
+    NOTIFY_JOBS: "*"
     # NOTIFY_FAILURES_ONLY: "1"
     # NOTIFY_TITLE_PREFIX: bigband
     # NOTIFY_SOUND: default
@@ -28,6 +28,6 @@ restart:
     initial_backoff: 1s
     max_backoff: 30s
 subscribes:
-    - task_run.completed
-    - task_run.failed_pre_exec
+    - job_run.completed
+    - job_run.failed_pre_exec
 enabled: true

@@ -6,11 +6,11 @@ package bigbandext
 //
 // To decode an envelope's Data:
 //
-//	var d bigbandext.TaskRunCompletedData
+//	var d bigbandext.JobRunCompletedData
 //	if err := json.Unmarshal(env.Data, &d); err != nil { ... }
 
-// TaskRunStartedData accompanies TypeTaskRunStarted.
-type TaskRunStartedData struct {
+// JobRunStartedData accompanies TypeJobRunStarted.
+type JobRunStartedData struct {
 	Folder     string `json:"folder,omitempty"`
 	Schedule   string `json:"schedule,omitempty"`
 	OneOff     bool   `json:"one_off,omitempty"`
@@ -21,8 +21,8 @@ type TaskRunStartedData struct {
 	Ephemeral  bool   `json:"ephemeral,omitempty"`
 }
 
-// TaskRunWorktreeReadyData accompanies TypeTaskRunWorktreeReady.
-type TaskRunWorktreeReadyData struct {
+// JobRunWorktreeReadyData accompanies TypeJobRunWorktreeReady.
+type JobRunWorktreeReadyData struct {
 	WorktreePath string `json:"worktree_path"`
 	RunDir       string `json:"run_dir,omitempty"`
 }
@@ -48,10 +48,10 @@ type ClaudeWakeupData struct {
 	Prompt       string `json:"prompt,omitempty"`
 }
 
-// TaskRunCompletedData accompanies TypeTaskRunCompleted. Folder and
+// JobRunCompletedData accompanies TypeJobRunCompleted. Folder and
 // WorktreePath together let an integration follow up on the run without
 // re-querying state — see cmd/bigband-slack for a worked example.
-type TaskRunCompletedData struct {
+type JobRunCompletedData struct {
 	Status       string `json:"status"`
 	FinalMessage string `json:"final_message,omitempty"`
 	LogPath      string `json:"log_path,omitempty"`
@@ -62,8 +62,8 @@ type TaskRunCompletedData struct {
 	DurationMS   int64  `json:"duration_ms,omitempty"`
 }
 
-// TaskRunPreFailedData accompanies TypeTaskRunPreFailed.
-type TaskRunPreFailedData struct {
+// JobRunPreFailedData accompanies TypeJobRunPreFailed.
+type JobRunPreFailedData struct {
 	Command string `json:"command,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
@@ -95,9 +95,9 @@ type ExtensionFailedData struct {
 
 // ConfigReloadedData accompanies TypeConfigReloaded. The counts are a quick
 // observability signal for subscribers; the canonical config remains
-// ~/.bigband-tasks/config.yaml.
+// ~/.bigband/config.yaml.
 type ConfigReloadedData struct {
-	TaskCount       int `json:"task_count"`
+	JobCount        int `json:"job_count"`
 	ScheduledCount  int `json:"scheduled_count"`
 	OneOffCount     int `json:"one_off_count"`
 	DisabledCount   int `json:"disabled_count"`

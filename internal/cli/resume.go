@@ -14,46 +14,58 @@ import (
 
 func NewResumeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:               "resume <task>",
-		Short:             "Resume the agent session from a task's last run in its worktree",
+		Use:               "resume <job>",
+		Short:             "Resume the agent session from a job's last run (in its worktree, or its folder if it ran in-place)",
 		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeJobNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return resumeTask(cmd.Context(), args[0])
+			return resumeJob(cmd.Context(), args[0])
 		},
 	}
 }
 
-func resumeTask(ctx context.Context, name string) error {
+func resumeJob(ctx context.Context, name string) error {
 	st, err := state.Load()
 	if err != nil {
 		return err
 	}
-	ts := st.Get(name)
+	js := st.Get(name)
 
-	if ts.WorktreePath == "" {
-		return fmt.Errorf("task %q has no tracked worktree — run the task first (or check that keep_worktree is not false)", name)
+	// Prefer the worktree when one was tracked. Fall back to the folder the run
+	// executed in (recorded as js.Folder) so jobs that ran in-place — either
+	// because use_worktree was false or because the worktree was cleaned up
+	// after the run — remain resumable from their original directory.
+	runDir := js.WorktreePath
+	fromWorktree := runDir != ""
+	if runDir == "" {
+		runDir = js.Folder
 	}
-	if _, err := os.Stat(ts.WorktreePath); err != nil {
-		return fmt.Errorf("worktree %s no longer exists on disk — use 'bigband worktree rm %s' to clear the stale reference", ts.WorktreePath, name)
+	if runDir == "" {
+		return fmt.Errorf("job %q has no tracked run directory — run the job first", name)
+	}
+	if _, err := os.Stat(runDir); err != nil {
+		if fromWorktree {
+			return fmt.Errorf("worktree %s no longer exists on disk — use 'bigband worktree rm %s' to clear the stale reference", runDir, name)
+		}
+		return fmt.Errorf("run directory %s no longer exists on disk", runDir)
 	}
 
-	// Resolve the agent the same way the runner does: prefer task-level, then
+	// Resolve the agent the same way the runner does: prefer job-level, then
 	// defaults.agent, then DefaultAgent. Falling back to DefaultAgent on a
 	// config error keeps `resume` usable when the config has drifted.
 	agentName := config.DefaultAgent
 	if cfg, err := config.Load(paths.Config()); err == nil {
-		if t := cfg.TaskByName(name); t != nil {
-			agentName = cfg.EffectiveAgent(t)
+		if j := cfg.JobByName(name); j != nil {
+			agentName = cfg.EffectiveAgent(j)
 		} else if cfg.Defaults.Agent != "" {
 			agentName = cfg.Defaults.Agent
 		}
 	}
 
-	if ts.SessionID != "" {
-		fmt.Printf("Resuming session %s in %s\n", ts.SessionID, ts.WorktreePath)
+	if js.SessionID != "" {
+		fmt.Printf("Resuming session %s in %s\n", js.SessionID, runDir)
 	} else {
-		fmt.Printf("No session ID recorded; continuing most recent session in %s\n", ts.WorktreePath)
+		fmt.Printf("No session ID recorded; continuing most recent session in %s\n", runDir)
 	}
 
 	ag, err := agent.Get(agentName)
@@ -62,5 +74,5 @@ func resumeTask(ctx context.Context, name string) error {
 	}
 	// ResumeInteractive replaces the current process; on success it does not
 	// return.
-	return ag.ResumeInteractive(ctx, ts.SessionID, ts.WorktreePath)
+	return ag.ResumeInteractive(ctx, js.SessionID, runDir)
 }

@@ -50,7 +50,7 @@ func Run() error {
 		return fmt.Errorf("creating directories: %w", err)
 	}
 
-	// Single-instance guard. Two daemons sharing ~/.bigband-tasks (e.g. a
+	// Single-instance guard. Two daemons sharing ~/.bigband (e.g. a
 	// leftover from a renamed launchd plist) silently corrupt state.json and
 	// race on daemon.sock — see the bigband-slack/state.json race that drops
 	// Slack replies. Refuse to start a duplicate and tell the operator which
@@ -95,7 +95,7 @@ func Run() error {
 	st, err := state.Load()
 	if err != nil {
 		log.Printf("WARNING: could not load state: %v", err)
-		st = &state.State{Tasks: map[string]*state.TaskState{}}
+		st = &state.State{Jobs: map[string]*state.JobState{}}
 	}
 
 	initialCfg, err := config.Load(paths.Config())
@@ -117,14 +117,14 @@ func Run() error {
 	defer bus.Close()
 
 	// Mirror lifecycle events into the daemon log so operators can trace
-	// what's happening without tailing each per-task log file. The events
+	// what's happening without tailing each per-job log file. The events
 	// JSONL file is still the structured ground truth; this is the human
 	// summary. Goroutine exits when bus.Close (deferred above) closes the
 	// subscriber channel.
 	go logBusEvents(bus)
 
 	// Extension supervisor: spawns and watches every extension declared by a
-	// manifest under ~/.bigband-tasks/extensions/<name>/manifest.yaml. This
+	// manifest under ~/.bigband/extensions/<name>/manifest.yaml. This
 	// is what lets the user run only `bigband install` and have all
 	// integrations come up automatically — no per-extension LaunchAgents.
 	extDir := filepath.Join(paths.Root(), "extensions")
@@ -141,7 +141,7 @@ func Run() error {
 	defer sup.Shutdown(30 * time.Second)
 
 	// Periodically prune ephemeral one-off entries (state + logs) older
-	// than the configured retention. Configured tasks are never pruned.
+	// than the configured retention. Configured jobs are never pruned.
 	go runPruneLoop(ctx, &cfgPtr, st)
 
 	started := time.Now()
@@ -152,37 +152,37 @@ func Run() error {
 		cancels   = map[string]context.CancelFunc{}
 	)
 
-	runTask := func(c *config.Config, t *config.Task) {
+	runJob := func(c *config.Config, j *config.Job) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancelsMu.Lock()
-		cancels[t.Name] = cancel
+		cancels[j.Name] = cancel
 		cancelsMu.Unlock()
 		defer func() {
 			cancelsMu.Lock()
-			delete(cancels, t.Name)
+			delete(cancels, j.Name)
 			cancelsMu.Unlock()
 			cancel()
 		}()
-		runner.Run(ctx, c, t, st, io.Discard, bus)
+		runner.Run(ctx, c, j, st, io.Discard, bus)
 	}
 
-	// launchTask spawns runTask in a goroutine tracked by the WaitGroup so that
-	// graceful shutdown can wait for in-flight tasks to finish. The scheduler and
-	// IPC "run" handler both call this instead of go+runTask directly.
-	launchTask := func(c *config.Config, t *config.Task) {
+	// launchJob spawns runJob in a goroutine tracked by the WaitGroup so that
+	// graceful shutdown can wait for in-flight jobs to finish. The scheduler and
+	// IPC "run" handler both call this instead of go+runJob directly.
+	launchJob := func(c *config.Config, j *config.Job) {
 		mode := "fresh"
-		if t.ResumeSessionID != "" {
-			mode = "resume:" + t.ResumeSessionID
+		if j.ResumeSessionID != "" {
+			mode = "resume:" + j.ResumeSessionID
 		}
-		log.Printf("bigband: launching task=%s folder=%s ephemeral=%v %s", t.Name, t.Folder, t.Ephemeral, mode)
+		log.Printf("bigband: launching job=%s folder=%s ephemeral=%v %s", j.Name, j.Folder, j.Ephemeral, mode)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			runTask(c, t)
+			runJob(c, j)
 		}()
 	}
 
-	stopTask := func(name string) bool {
+	stopJob := func(name string) bool {
 		cancelsMu.Lock()
 		cancel, ok := cancels[name]
 		cancelsMu.Unlock()
@@ -192,7 +192,7 @@ func Run() error {
 		return ok
 	}
 
-	sched := scheduler.New(launchTask, func(name string) bool {
+	sched := scheduler.New(launchJob, func(name string) bool {
 		return st.Get(name).LastRun != nil
 	})
 	sched.Reload(cfgPtr.Load())
@@ -245,7 +245,7 @@ func Run() error {
 				out = append(out, ipc.SubscriberInfo{
 					Name:        s.Name,
 					Types:       types,
-					Tasks:       s.Tasks,
+					Jobs:        s.Jobs,
 					ConnectedAt: s.ConnectedAt,
 					LagDropped:  s.LagDropped,
 				})
@@ -260,7 +260,7 @@ func Run() error {
 			}
 			return
 		}
-		reply := handleCmd(cmd, cfgPtr.Load(), sched, st, started, launchTask, stopTask, sup)
+		reply := handleCmd(cmd, cfgPtr.Load(), sched, st, started, launchJob, stopJob, sup)
 		if err := json.NewEncoder(conn).Encode(reply); err != nil {
 			log.Printf("bigband: ipc encode reply action=%s: %v", cmd.Action, err)
 		}
@@ -271,11 +271,11 @@ func Run() error {
 	defer stopIPC()
 
 	var scheduled, oneOff, disabled int
-	for _, t := range cfgPtr.Load().Tasks {
+	for _, j := range cfgPtr.Load().Jobs {
 		switch {
-		case !t.IsEnabled():
+		case !j.IsEnabled():
 			disabled++
-		case t.IsOneOff():
+		case j.IsOneOff():
 			oneOff++
 		default:
 			scheduled++
@@ -287,9 +287,9 @@ func Run() error {
 	log.Println("bigband daemon stopping")
 	sched.Stop()
 
-	// Cancel all in-flight tasks, then wait up to the grace period for them to
+	// Cancel all in-flight jobs, then wait up to the grace period for them to
 	// finish. killProcessGroupOnCancel sends SIGTERM to each subprocess group;
-	// WaitDelay in the runner escalates to SIGKILL after 5 s, so tasks that
+	// WaitDelay in the runner escalates to SIGKILL after 5 s, so jobs that
 	// ignore SIGTERM are still collected well within the 30 s window.
 	cancelsMu.Lock()
 	for _, cancel := range cancels {
@@ -304,7 +304,7 @@ func Run() error {
 	select {
 	case <-done:
 	case <-time.After(grace):
-		log.Printf("bigband: grace period (%s) exceeded, some tasks may not have finished cleanly", grace)
+		log.Printf("bigband: grace period (%s) exceeded, some jobs may not have finished cleanly", grace)
 	}
 	return nil
 }
@@ -314,18 +314,18 @@ func Run() error {
 // can log a meaningful line on every reload without re-parsing the file.
 func configReloadedPayload(cfg *config.Config) events.ConfigReloadedData {
 	var scheduled, oneOff, disabled int
-	for _, t := range cfg.Tasks {
+	for _, j := range cfg.Jobs {
 		switch {
-		case !t.IsEnabled():
+		case !j.IsEnabled():
 			disabled++
-		case t.IsOneOff():
+		case j.IsOneOff():
 			oneOff++
 		default:
 			scheduled++
 		}
 	}
 	return events.ConfigReloadedData{
-		TaskCount:      len(cfg.Tasks),
+		JobCount:       len(cfg.Jobs),
 		ScheduledCount: scheduled,
 		OneOffCount:    oneOff,
 		DisabledCount:  disabled,
@@ -333,85 +333,85 @@ func configReloadedPayload(cfg *config.Config) events.ConfigReloadedData {
 	}
 }
 
-func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *state.State, started time.Time, runTask func(*config.Config, *config.Task), stopTask func(string) bool, sup *extensions.Supervisor) ipc.Reply {
+func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *state.State, started time.Time, runJob func(*config.Config, *config.Job), stopJob func(string) bool, sup *extensions.Supervisor) ipc.Reply {
 	switch cmd.Action {
 	case "ping":
 		return ipc.Reply{OK: true}
 
 	case "status":
 		nextRuns := sched.NextRuns()
-		var tasks []ipc.TaskStatus
+		var jobs []ipc.JobStatus
 		seen := map[string]bool{}
-		for _, t := range cfg.Tasks {
-			seen[t.Name] = true
-			ts := st.Get(t.Name)
-			next := nextRuns[t.Name]
+		for _, j := range cfg.Jobs {
+			seen[j.Name] = true
+			js := st.Get(j.Name)
+			next := nextRuns[j.Name]
 			switch {
-			case !t.IsEnabled():
+			case !j.IsEnabled():
 				next = "disabled"
-			case t.IsOneOff():
-				if ts.LastRun != nil {
+			case j.IsOneOff():
+				if js.LastRun != nil {
 					next = "done"
 				} else {
 					next = "pending"
 				}
 			}
 			lastRun := ""
-			if ts.LastRun != nil {
-				lastRun = ts.LastRun.Local().Format("2006-01-02 15:04:05")
+			if js.LastRun != nil {
+				lastRun = js.LastRun.Local().Format("2006-01-02 15:04:05")
 			}
-			tasks = append(tasks, ipc.TaskStatus{
-				Name:         t.Name,
-				Schedule:     t.Schedule,
-				Enabled:      t.IsEnabled(),
+			jobs = append(jobs, ipc.JobStatus{
+				Name:         j.Name,
+				Schedule:     j.Schedule,
+				Enabled:      j.IsEnabled(),
 				NextRun:      next,
 				LastRun:      lastRun,
-				LastStatus:   string(ts.LastStatus),
-				LastDuration: ts.LastDuration,
-				LastLog:      ts.LastLog,
-				WorktreePath: ts.WorktreePath,
-				Folder:       t.Folder,
-				WorktreeMode: t.WorktreeMode(),
-				SessionID:    ts.SessionID,
-				Prompt:       t.Prompt,
+				LastStatus:   string(js.LastStatus),
+				LastDuration: js.LastDuration,
+				LastLog:      js.LastLog,
+				WorktreePath: js.WorktreePath,
+				Folder:       j.Folder,
+				WorktreeMode: j.WorktreeMode(),
+				SessionID:    js.SessionID,
+				Prompt:       j.Prompt,
 			})
 		}
 		// Surface ephemeral submissions (state-only — never made it into
 		// config.yaml). Without this they're invisible to `bb list` and
 		// `bb status`. Sorted for stable output.
 		var ephemeralNames []string
-		for name, ts := range st.Tasks {
-			if seen[name] || ts == nil || ts.LastRun == nil {
+		for name, js := range st.Jobs {
+			if seen[name] || js == nil || js.LastRun == nil {
 				continue
 			}
 			ephemeralNames = append(ephemeralNames, name)
 		}
 		sort.Strings(ephemeralNames)
 		for _, name := range ephemeralNames {
-			ts := st.Tasks[name]
-			lastRun := ts.LastRun.Local().Format("2006-01-02 15:04:05")
+			js := st.Jobs[name]
+			lastRun := js.LastRun.Local().Format("2006-01-02 15:04:05")
 			next := "done"
-			if ts.LastStatus == state.StatusRunning {
+			if js.LastStatus == state.StatusRunning {
 				next = "running"
 			}
-			tasks = append(tasks, ipc.TaskStatus{
+			jobs = append(jobs, ipc.JobStatus{
 				Name:         name,
 				Schedule:     "one-off",
 				Enabled:      true,
 				NextRun:      next,
 				LastRun:      lastRun,
-				LastStatus:   string(ts.LastStatus),
-				LastDuration: ts.LastDuration,
-				LastLog:      ts.LastLog,
-				WorktreePath: ts.WorktreePath,
-				Folder:       ts.Folder,
+				LastStatus:   string(js.LastStatus),
+				LastDuration: js.LastDuration,
+				LastLog:      js.LastLog,
+				WorktreePath: js.WorktreePath,
+				Folder:       js.Folder,
 				Ephemeral:    true,
-				SessionID:    ts.SessionID,
+				SessionID:    js.SessionID,
 			})
 		}
 		payload := ipc.StatusPayload{
 			Uptime: time.Since(started).Round(time.Second).String(),
-			Tasks:  tasks,
+			Jobs:   jobs,
 		}
 		raw, err := json.Marshal(payload)
 		if err != nil {
@@ -420,58 +420,58 @@ func handleCmd(cmd ipc.Cmd, cfg *config.Config, sched *scheduler.Scheduler, st *
 		return ipc.Reply{OK: true, Payload: raw}
 
 	case "run":
-		t := cfg.TaskByName(cmd.Task)
-		if t == nil {
-			log.Printf("bigband: ipc run task=%s rejected: unknown", cmd.Task)
-			return ipc.Reply{OK: false, Error: "unknown task: " + cmd.Task}
+		j := cfg.JobByName(cmd.Job)
+		if j == nil {
+			log.Printf("bigband: ipc run job=%s rejected: unknown", cmd.Job)
+			return ipc.Reply{OK: false, Error: "unknown job: " + cmd.Job}
 		}
-		log.Printf("bigband: ipc run task=%s", cmd.Task)
-		t.ClearJitter() // Don't apply jitter to manual runs.
-		runTask(cfg, t)
+		log.Printf("bigband: ipc run job=%s", cmd.Job)
+		j.ClearJitter() // Don't apply jitter to manual runs.
+		runJob(cfg, j)
 		return ipc.Reply{OK: true}
 
 	case "stop":
-		if !stopTask(cmd.Task) {
-			log.Printf("bigband: ipc stop task=%s rejected: not running", cmd.Task)
-			return ipc.Reply{OK: false, Error: "task " + cmd.Task + " is not running"}
+		if !stopJob(cmd.Job) {
+			log.Printf("bigband: ipc stop job=%s rejected: not running", cmd.Job)
+			return ipc.Reply{OK: false, Error: "job " + cmd.Job + " is not running"}
 		}
-		log.Printf("bigband: ipc stop task=%s", cmd.Task)
+		log.Printf("bigband: ipc stop job=%s", cmd.Job)
 		return ipc.Reply{OK: true}
 
 	case "forget":
-		if cmd.Task == "" {
-			return ipc.Reply{OK: false, Error: "forget: task name required"}
+		if cmd.Job == "" {
+			return ipc.Reply{OK: false, Error: "forget: job name required"}
 		}
-		ts := st.Get(cmd.Task)
-		if ts.RunningPID != 0 {
+		js := st.Get(cmd.Job)
+		if js.RunningPID != 0 {
 			// Don't drop state for an in-flight run — the runner needs the
 			// row to record completion. CLI rm refuses this case anyway.
-			log.Printf("bigband: ipc forget task=%s rejected: running", cmd.Task)
-			return ipc.Reply{OK: false, Error: "task " + cmd.Task + " has a running pid; stop it first"}
+			log.Printf("bigband: ipc forget job=%s rejected: running", cmd.Job)
+			return ipc.Reply{OK: false, Error: "job " + cmd.Job + " has a running pid; stop it first"}
 		}
-		if err := st.RemoveTask(cmd.Task); err != nil {
+		if err := st.RemoveJob(cmd.Job); err != nil {
 			return ipc.Reply{OK: false, Error: err.Error()}
 		}
-		log.Printf("bigband: ipc forget task=%s", cmd.Task)
+		log.Printf("bigband: ipc forget job=%s", cmd.Job)
 		return ipc.Reply{OK: true}
 
 	case "submit":
 		if cmd.Submit == nil {
 			return ipc.Reply{OK: false, Error: "submit: missing payload"}
 		}
-		t, runID, err := buildSubmittedTask(cmd.Submit, cfg, st)
+		j, runID, err := buildSubmittedJob(cmd.Submit, cfg, st)
 		if err != nil {
 			log.Printf("bigband: ipc submit rejected: %v", err)
 			return ipc.Reply{OK: false, Error: err.Error()}
 		}
-		log.Printf("bigband: ipc submit task=%s folder=%s parent_session=%q triggered_by=%q ephemeral=%v",
-			t.Name, t.Folder, cmd.Submit.ParentSessionID, cmd.Submit.TriggeredBy, cmd.Submit.Ephemeral)
-		logPath := filepath.Join(paths.TaskLogDir(t.Name), t.RunTimestamp+".log")
-		runTask(cfg, t)
+		log.Printf("bigband: ipc submit job=%s folder=%s parent_session=%q triggered_by=%q ephemeral=%v",
+			j.Name, j.Folder, cmd.Submit.ParentSessionID, cmd.Submit.TriggeredBy, cmd.Submit.Ephemeral)
+		logPath := filepath.Join(paths.JobLogDir(j.Name), j.RunTimestamp+".log")
+		runJob(cfg, j)
 		raw, err := json.Marshal(ipc.SubmitRunReply{
-			RunID:    runID,
-			TaskName: t.Name,
-			LogPath:  logPath,
+			RunID:   runID,
+			JobName: j.Name,
+			LogPath: logPath,
 		})
 		if err != nil {
 			return ipc.Reply{OK: false, Error: "marshal submit reply: " + err.Error()}
@@ -551,7 +551,7 @@ func handleSubscribe(conn net.Conn, cmd ipc.Cmd, bus *events.Bus) {
 	var (
 		name  string
 		types []events.Type
-		tasks []string
+		jobs  []string
 		since time.Time
 	)
 	if cmd.Subscribe != nil {
@@ -559,7 +559,7 @@ func handleSubscribe(conn net.Conn, cmd ipc.Cmd, bus *events.Bus) {
 		for _, t := range cmd.Subscribe.Types {
 			types = append(types, events.Type(t))
 		}
-		tasks = cmd.Subscribe.Tasks
+		jobs = cmd.Subscribe.Jobs
 		if cmd.Subscribe.Since != "" {
 			t, err := time.Parse(time.RFC3339, cmd.Subscribe.Since)
 			if err != nil {
@@ -575,8 +575,8 @@ func handleSubscribe(conn net.Conn, cmd ipc.Cmd, bus *events.Bus) {
 	if err := json.NewEncoder(conn).Encode(ipc.Reply{OK: true}); err != nil {
 		return
 	}
-	filter := events.Filter{Types: types, Tasks: tasks}
-	log.Printf("bigband: subscriber connected name=%q types=%v tasks=%v replay_since=%v", name, types, tasks, since)
+	filter := events.Filter{Types: types, Jobs: jobs}
+	log.Printf("bigband: subscriber connected name=%q types=%v jobs=%v replay_since=%v", name, types, jobs, since)
 
 	// Subscribe to live first so events that arrive during replay aren't lost.
 	ch, cancel := bus.Subscribe(filter, name)
@@ -673,49 +673,49 @@ func pruneOnce(cfg *config.Config, st *state.State) {
 	configured := configuredNames(cfg)
 	removed := st.RemoveStaleEphemerals(configured, cutoff)
 	for _, r := range removed {
-		dir := paths.TaskLogDir(r.Name)
+		dir := paths.JobLogDir(r.Name)
 		if err := os.RemoveAll(dir); err != nil {
 			log.Printf("bigband: prune logs %s: %v", dir, err)
 		}
 		if r.WorktreePath != "" {
 			pruneEphemeralWorktree(r)
 		}
-		log.Printf("bigband: pruned ephemeral task=%s (last_run before %s)", r.Name, cutoff.Format(time.RFC3339))
+		log.Printf("bigband: pruned ephemeral job=%s (last_run before %s)", r.Name, cutoff.Format(time.RFC3339))
 	}
 }
 
-// pruneEphemeralWorktree removes the worktree that an ephemeral task owned.
-// Configured tasks never reach this code path — RemoveStaleEphemerals filters
+// pruneEphemeralWorktree removes the worktree that an ephemeral job owned.
+// Configured jobs never reach this code path — RemoveStaleEphemerals filters
 // them out — so the only worktrees touched here are <repo>-bb-<oneoff-...>
 // dirs created by the ephemeral that's being pruned. worktree.Remove enforces
 // its own guardrails (sibling-of-repo-root + "<repo>-bb-" basename prefix), so
 // a corrupted state.json cannot weaponise this path.
 func pruneEphemeralWorktree(r state.RemovedEphemeral) {
 	if r.Folder == "" {
-		log.Printf("bigband: prune worktree %s for task=%s skipped: no recorded folder, cannot resolve repo root", r.WorktreePath, r.Name)
+		log.Printf("bigband: prune worktree %s for job=%s skipped: no recorded folder, cannot resolve repo root", r.WorktreePath, r.Name)
 		return
 	}
 	repoRoot, err := worktree.RepoRoot(r.Folder)
 	if err != nil {
-		log.Printf("bigband: prune worktree %s for task=%s skipped: %v", r.WorktreePath, r.Name, err)
+		log.Printf("bigband: prune worktree %s for job=%s skipped: %v", r.WorktreePath, r.Name, err)
 		return
 	}
 	if _, err := os.Stat(r.WorktreePath); err != nil {
 		return
 	}
 	if err := worktree.Remove(repoRoot, r.WorktreePath); err != nil {
-		log.Printf("bigband: prune worktree %s for task=%s: %v", r.WorktreePath, r.Name, err)
+		log.Printf("bigband: prune worktree %s for job=%s: %v", r.WorktreePath, r.Name, err)
 		return
 	}
-	log.Printf("bigband: pruned worktree %s for task=%s", r.WorktreePath, r.Name)
+	log.Printf("bigband: pruned worktree %s for job=%s", r.WorktreePath, r.Name)
 }
 
-// configuredNames returns the set of task and template names from cfg, used
+// configuredNames returns the set of job and template names from cfg, used
 // to protect them from ephemeral pruning.
 func configuredNames(cfg *config.Config) map[string]bool {
-	out := make(map[string]bool, len(cfg.Tasks)+len(cfg.Templates))
-	for _, t := range cfg.Tasks {
-		out[t.Name] = true
+	out := make(map[string]bool, len(cfg.Jobs)+len(cfg.Templates))
+	for _, j := range cfg.Jobs {
+		out[j.Name] = true
 	}
 	for _, t := range cfg.Templates {
 		out[t.Name] = true
@@ -733,7 +733,7 @@ func logBusEvents(bus *events.Bus) {
 		if env.TriggeredBy != "" {
 			summary += " triggered_by=" + env.TriggeredBy
 		}
-		log.Printf("event task=%s run=%s %s %s", env.TaskName, env.RunID, env.Type, summary)
+		log.Printf("event job=%s run=%s %s %s", env.JobName, env.RunID, env.Type, summary)
 	}
 }
 
@@ -741,8 +741,8 @@ func logBusEvents(bus *events.Bus) {
 // Each event type only surfaces the fields that are useful for tracing.
 func summarizeEvent(env events.Envelope) string {
 	switch env.Type {
-	case events.TypeTaskRunStarted:
-		var d events.TaskRunStartedData
+	case events.TypeJobRunStarted:
+		var d events.JobRunStartedData
 		_ = json.Unmarshal(env.Data, &d)
 		parts := []string{"folder=" + quote(d.Folder)}
 		if d.Schedule != "" {
@@ -758,8 +758,8 @@ func summarizeEvent(env events.Envelope) string {
 			parts = append(parts, "ephemeral=true")
 		}
 		return strings.Join(parts, " ")
-	case events.TypeTaskRunWorktreeReady:
-		var d events.TaskRunWorktreeReadyData
+	case events.TypeJobRunWorktreeReady:
+		var d events.JobRunWorktreeReadyData
 		_ = json.Unmarshal(env.Data, &d)
 		return "worktree=" + quote(d.WorktreePath)
 	case events.TypeClaudeSessionStarted:
@@ -790,8 +790,8 @@ func summarizeEvent(env events.Envelope) string {
 		var d events.ClaudeWakeupData
 		_ = json.Unmarshal(env.Data, &d)
 		return fmt.Sprintf("delay=%ds", d.DelaySeconds)
-	case events.TypeTaskRunCompleted:
-		var d events.TaskRunCompletedData
+	case events.TypeJobRunCompleted:
+		var d events.JobRunCompletedData
 		_ = json.Unmarshal(env.Data, &d)
 		parts := []string{"status=" + d.Status, fmt.Sprintf("duration=%dms", d.DurationMS)}
 		if d.SessionID != "" {
@@ -804,8 +804,8 @@ func summarizeEvent(env events.Envelope) string {
 			parts = append(parts, fmt.Sprintf("msg_len=%d", len(d.FinalMessage)))
 		}
 		return strings.Join(parts, " ")
-	case events.TypeTaskRunPreFailed:
-		var d events.TaskRunPreFailedData
+	case events.TypeJobRunPreFailed:
+		var d events.JobRunPreFailedData
 		_ = json.Unmarshal(env.Data, &d)
 		return fmt.Sprintf("command=%s error=%s", quote(d.Command), quote(d.Error))
 	case events.TypeSubscriberLagged:
@@ -834,8 +834,8 @@ func summarizeEvent(env events.Envelope) string {
 	case events.TypeConfigReloaded:
 		var d events.ConfigReloadedData
 		_ = json.Unmarshal(env.Data, &d)
-		return fmt.Sprintf("tasks=%d scheduled=%d one_off=%d disabled=%d templates=%d",
-			d.TaskCount, d.ScheduledCount, d.OneOffCount, d.DisabledCount, d.TemplatesCount)
+		return fmt.Sprintf("jobs=%d scheduled=%d one_off=%d disabled=%d templates=%d",
+			d.JobCount, d.ScheduledCount, d.OneOffCount, d.DisabledCount, d.TemplatesCount)
 	}
 	return ""
 }
@@ -847,14 +847,14 @@ func quote(s string) string {
 	return s
 }
 
-// buildSubmittedTask converts an IPC SubmitRunRequest into an in-memory Task
+// buildSubmittedJob converts an IPC SubmitRunRequest into an in-memory Job
 // suitable for runner.Run. Validates the folder exists, fills in a default
 // name when blank, and parses the optional timeout.
 //
-// The returned task is never persisted to config.yaml — Ephemeral=true marks
+// The returned job is never persisted to config.yaml — Ephemeral=true marks
 // it so callers (e.g. config.Save) can skip it. State entries created during
 // the run still land in state.json so logs and follow-ups remain addressable.
-func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, st *state.State) (*config.Task, string, error) {
+func buildSubmittedJob(req *ipc.SubmitRunRequest, cfg *config.Config, st *state.State) (*config.Job, string, error) {
 	if req.Folder == "" {
 		return nil, "", fmt.Errorf("submit: folder is required")
 	}
@@ -886,15 +886,15 @@ func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, st *state
 	if !config.IsValidName(name) {
 		return nil, "", fmt.Errorf("submit: invalid name %q", name)
 	}
-	// Reject collisions with any task currently in config.yaml — we never want
-	// a submitted run to be confused with a configured task.
-	if cfg.TaskByName(name) != nil {
-		return nil, "", fmt.Errorf("submit: name %q collides with an existing configured task", name)
+	// Reject collisions with any job currently in config.yaml — we never want
+	// a submitted run to be confused with a configured job.
+	if cfg.JobByName(name) != nil {
+		return nil, "", fmt.Errorf("submit: name %q collides with an existing configured job", name)
 	}
 	// Also reject if an ephemeral with this name is already running — two
 	// concurrent runs sharing a name would clobber each other's state slot.
 	if st.Get(name).RunningPID != 0 {
-		return nil, "", fmt.Errorf("submit: name %q collides with a currently running task", name)
+		return nil, "", fmt.Errorf("submit: name %q collides with a currently running job", name)
 	}
 
 	// Pin the run timestamp now so the synchronously-returned run id matches
@@ -902,7 +902,7 @@ func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, st *state
 	// the log filename).
 	ts := time.Now().UTC().Format("2006-01-02T15-04-05Z")
 
-	t := &config.Task{
+	j := &config.Job{
 		Name:            name,
 		Folder:          req.Folder,
 		Prompt:          req.Prompt,
@@ -923,22 +923,22 @@ func buildSubmittedTask(req *ipc.SubmitRunRequest, cfg *config.Config, st *state
 		if err != nil {
 			return nil, "", fmt.Errorf("submit: invalid timeout %q: %w", req.Timeout, err)
 		}
-		t.Timeout = &config.Duration{Duration: dur}
+		j.Timeout = &config.Duration{Duration: dur}
 	}
 	runID := name + "/" + ts
-	return t, runID, nil
+	return j, runID, nil
 }
 
 func reconcileOrphans(ctx context.Context, cfg *config.Config, st *state.State) {
 	configured := map[string]bool{}
-	for _, task := range cfg.Tasks {
-		configured[task.Name] = true
-		reconcileOrphan(ctx, task.Name, st)
+	for _, job := range cfg.Jobs {
+		configured[job.Name] = true
+		reconcileOrphan(ctx, job.Name, st)
 	}
 	// Also sweep ephemeral state entries that were running when the daemon last
-	// stopped. Without this, a crashed ephemeral task keeps RunningPID set
+	// stopped. Without this, a crashed ephemeral job keeps RunningPID set
 	// forever, making it appear "running" and blocking forget/rm.
-	for name := range st.Tasks {
+	for name := range st.Jobs {
 		if !configured[name] {
 			reconcileOrphan(ctx, name, st)
 		}
@@ -946,16 +946,16 @@ func reconcileOrphans(ctx context.Context, cfg *config.Config, st *state.State) 
 }
 
 func reconcileOrphan(ctx context.Context, name string, st *state.State) {
-	ts := st.Get(name)
-	if ts.RunningPID == 0 {
+	js := st.Get(name)
+	if js.RunningPID == 0 {
 		return
 	}
-	pid := ts.RunningPID
+	pid := js.RunningPID
 	if proc.Alive(pid) {
-		log.Printf("bigband: task %q has orphaned process %d — holding lock until it exits", name, pid)
+		log.Printf("bigband: job %q has orphaned process %d — holding lock until it exits", name, pid)
 		release, acquired := state.Lock(name)
 		if !acquired {
-			log.Printf("bigband: WARNING could not hold lock for orphan task %q", name)
+			log.Printf("bigband: WARNING could not hold lock for orphan job %q", name)
 			return
 		}
 		go func(name string, pid int, release func()) {
@@ -964,13 +964,13 @@ func reconcileOrphan(ctx context.Context, name string, st *state.State) {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Printf("bigband: orphaned process %d for task %q exited", pid, name)
+			log.Printf("bigband: orphaned process %d for job %q exited", pid, name)
 			if err := st.SetDone(name, state.StatusStopped, 0, "", ""); err != nil {
 				log.Printf("bigband: state update failed for %q: %v", name, err)
 			}
 		}(name, pid, release)
 	} else {
-		log.Printf("bigband: clearing stale running state for task %q (pid %d gone)", name, pid)
+		log.Printf("bigband: clearing stale running state for job %q (pid %d gone)", name, pid)
 		if err := st.SetDone(name, state.StatusUnknown, 0, "", ""); err != nil {
 			log.Printf("bigband: state update failed for %q: %v", name, err)
 		}

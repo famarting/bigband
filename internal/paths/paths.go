@@ -13,7 +13,7 @@ func Root() string {
 	if err != nil {
 		panic("bigband: cannot determine home directory: " + err.Error())
 	}
-	return filepath.Join(home, ".bigband-tasks")
+	return filepath.Join(home, ".bigband")
 }
 
 func Config() string       { return filepath.Join(Root(), "config.yaml") }
@@ -25,12 +25,12 @@ func StateFile() string { return filepath.Join(Root(), "state.json") }
 func StateDir() string  { return filepath.Join(Root(), "state") }
 func LogsDir() string   { return filepath.Join(Root(), "logs") }
 
-func TaskLogDir(name string) string { return filepath.Join(LogsDir(), name) }
-func TaskLockFile(name string) string {
+func JobLogDir(name string) string { return filepath.Join(LogsDir(), name) }
+func JobLockFile(name string) string {
 	return filepath.Join(StateDir(), name+".lock")
 }
-func TaskLogLatest(name string) string {
-	return filepath.Join(TaskLogDir(name), "latest.log")
+func JobLogLatest(name string) string {
+	return filepath.Join(JobLogDir(name), "latest.log")
 }
 
 // EventsFile is the JSONL append-only log of lifecycle events emitted by the

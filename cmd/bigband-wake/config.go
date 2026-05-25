@@ -10,12 +10,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// extensionName is both the directory name under ~/.bigband-tasks/extensions/
+// extensionName is both the directory name under ~/.bigband/extensions/
 // and the manifest's `name` field; they must match per the extension contract.
 const extensionName = "bigband-wake"
 
 // Config is the on-disk shape of
-// ~/.bigband-tasks/extensions/bigband-wake/config.yaml. Opt-in: with
+// ~/.bigband/extensions/bigband-wake/config.yaml. Opt-in: with
 // Enabled=false (the default after init) the daemon loop does nothing beyond
 // log a single line, so dropping the manifest in is safe.
 type Config struct {
@@ -35,6 +35,13 @@ type Config struct {
 	// ReconcileInterval is the safety-net cadence at which the daemon
 	// re-derives the wake set even without an event nudging it. Default 1h.
 	ReconcileInterval string `yaml:"reconcile_interval,omitempty"`
+
+	// AssertionDuration is how long to hold an IOPMAssertion preventing idle
+	// sleep after we detect a wake-from-sleep transition. Defaults to 45m,
+	// which gives the bigband daemon plenty of time to thaw and fire the
+	// scheduled cron tick before macOS would otherwise re-sleep. Set to "0"
+	// to disable assertion-holding entirely.
+	AssertionDuration string `yaml:"assertion_duration,omitempty"`
 }
 
 // LeadDuration returns LeadSeconds as a duration with a sensible default.
@@ -66,6 +73,25 @@ func (c *Config) ReconcileEvery() time.Duration {
 	d, err := time.ParseDuration(c.ReconcileInterval)
 	if err != nil || d < time.Minute {
 		return def
+	}
+	return d
+}
+
+// AssertionHold returns AssertionDuration parsed, with a default of 45m. An
+// explicit "0" disables assertion-holding (returns 0). Unparseable values
+// fall back to the default rather than failing loud because this is a
+// resilience knob — we'd rather always have *some* hold than refuse to start.
+func (c *Config) AssertionHold() time.Duration {
+	const def = 45 * time.Minute
+	if c.AssertionDuration == "" {
+		return def
+	}
+	d, err := time.ParseDuration(c.AssertionDuration)
+	if err != nil {
+		return def
+	}
+	if d < 0 {
+		return 0
 	}
 	return d
 }

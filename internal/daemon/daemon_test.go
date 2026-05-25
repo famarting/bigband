@@ -21,7 +21,7 @@ func withTempHome(t *testing.T) {
 }
 
 func emptyConfig() *config.Config {
-	return &config.Config{Tasks: []*config.Task{}}
+	return &config.Config{Jobs: []*config.Job{}}
 }
 
 func loadEmptyState(t *testing.T) *state.State {
@@ -41,46 +41,46 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
-// --- buildSubmittedTask ---
+// --- buildSubmittedJob ---
 
-func TestBuildSubmittedTask_Basic(t *testing.T) {
+func TestBuildSubmittedJob_Basic(t *testing.T) {
 	withTempHome(t)
 	folder := t.TempDir()
-	task, runID, err := buildSubmittedTask(
-		&ipc.SubmitRunRequest{Folder: folder, Prompt: "do the thing", Name: "my-task"},
+	job, runID, err := buildSubmittedJob(
+		&ipc.SubmitRunRequest{Folder: folder, Prompt: "do the thing", Name: "my-job"},
 		emptyConfig(), loadEmptyState(t),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if task.Name != "my-task" {
-		t.Errorf("name: want my-task, got %s", task.Name)
+	if job.Name != "my-job" {
+		t.Errorf("name: want my-job, got %s", job.Name)
 	}
-	if task.Folder != folder {
-		t.Errorf("folder: want %s, got %s", folder, task.Folder)
+	if job.Folder != folder {
+		t.Errorf("folder: want %s, got %s", folder, job.Folder)
 	}
 	if runID == "" {
 		t.Error("runID should not be empty")
 	}
 }
 
-func TestBuildSubmittedTask_RandomName(t *testing.T) {
+func TestBuildSubmittedJob_RandomName(t *testing.T) {
 	withTempHome(t)
-	task, _, err := buildSubmittedTask(
+	job, _, err := buildSubmittedJob(
 		&ipc.SubmitRunRequest{Folder: t.TempDir(), Prompt: "do something"},
 		emptyConfig(), loadEmptyState(t),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.HasPrefix(task.Name, "oneoff-") {
-		t.Errorf("auto-generated name should start with 'oneoff-', got %q", task.Name)
+	if !strings.HasPrefix(job.Name, "oneoff-") {
+		t.Errorf("auto-generated name should start with 'oneoff-', got %q", job.Name)
 	}
 }
 
-func TestBuildSubmittedTask_InvalidFolder(t *testing.T) {
+func TestBuildSubmittedJob_InvalidFolder(t *testing.T) {
 	withTempHome(t)
-	_, _, err := buildSubmittedTask(
+	_, _, err := buildSubmittedJob(
 		&ipc.SubmitRunRequest{Folder: "/does/not/exist/at/all", Prompt: "do something"},
 		emptyConfig(), loadEmptyState(t),
 	)
@@ -89,9 +89,9 @@ func TestBuildSubmittedTask_InvalidFolder(t *testing.T) {
 	}
 }
 
-func TestBuildSubmittedTask_EmptyPrompt(t *testing.T) {
+func TestBuildSubmittedJob_EmptyPrompt(t *testing.T) {
 	withTempHome(t)
-	_, _, err := buildSubmittedTask(
+	_, _, err := buildSubmittedJob(
 		&ipc.SubmitRunRequest{Folder: t.TempDir(), Prompt: "   "},
 		emptyConfig(), loadEmptyState(t),
 	)
@@ -100,9 +100,9 @@ func TestBuildSubmittedTask_EmptyPrompt(t *testing.T) {
 	}
 }
 
-func TestBuildSubmittedTask_InvalidName(t *testing.T) {
+func TestBuildSubmittedJob_InvalidName(t *testing.T) {
 	withTempHome(t)
-	_, _, err := buildSubmittedTask(
+	_, _, err := buildSubmittedJob(
 		&ipc.SubmitRunRequest{Folder: t.TempDir(), Prompt: "do something", Name: "bad name"},
 		emptyConfig(), loadEmptyState(t),
 	)
@@ -111,25 +111,25 @@ func TestBuildSubmittedTask_InvalidName(t *testing.T) {
 	}
 }
 
-func TestBuildSubmittedTask_CollidesWithRunning(t *testing.T) {
+func TestBuildSubmittedJob_CollidesWithRunning(t *testing.T) {
 	withTempHome(t)
 	folder := t.TempDir()
 	st := loadEmptyState(t)
-	if err := st.SetRunning("my-task", 9999, folder); err != nil {
+	if err := st.SetRunning("my-job", 9999, folder); err != nil {
 		t.Fatalf("SetRunning: %v", err)
 	}
-	_, _, err := buildSubmittedTask(
-		&ipc.SubmitRunRequest{Folder: folder, Prompt: "do something", Name: "my-task"},
+	_, _, err := buildSubmittedJob(
+		&ipc.SubmitRunRequest{Folder: folder, Prompt: "do something", Name: "my-job"},
 		emptyConfig(), st,
 	)
 	if err == nil {
-		t.Error("expected error for name collision with running task")
+		t.Error("expected error for name collision with running job")
 	}
 }
 
-func TestBuildSubmittedTask_MissingFolder(t *testing.T) {
+func TestBuildSubmittedJob_MissingFolder(t *testing.T) {
 	withTempHome(t)
-	_, _, err := buildSubmittedTask(
+	_, _, err := buildSubmittedJob(
 		&ipc.SubmitRunRequest{Folder: "", Prompt: "do something"},
 		emptyConfig(), loadEmptyState(t),
 	)
@@ -143,20 +143,20 @@ func TestBuildSubmittedTask_MissingFolder(t *testing.T) {
 func TestConfigReloadedPayload_Counts(t *testing.T) {
 	disabled := false
 	cfg := &config.Config{
-		Tasks: []*config.Task{
+		Jobs: []*config.Job{
 			{Name: "sched1", Schedule: "daily at 20:00"},
 			{Name: "one-off"},
 			{Name: "disabled", Enabled: &disabled},
 			{Name: "sched2", Schedule: "weekly"},
 		},
-		Templates: []*config.Task{
+		Templates: []*config.Job{
 			{Name: "tpl1"},
 			{Name: "tpl2"},
 		},
 	}
 	p := configReloadedPayload(cfg)
-	if p.TaskCount != 4 {
-		t.Errorf("TaskCount: want 4, got %d", p.TaskCount)
+	if p.JobCount != 4 {
+		t.Errorf("JobCount: want 4, got %d", p.JobCount)
 	}
 	if p.ScheduledCount != 2 {
 		t.Errorf("ScheduledCount: want 2, got %d", p.ScheduledCount)
@@ -174,10 +174,10 @@ func TestConfigReloadedPayload_Counts(t *testing.T) {
 
 // --- summarizeEvent ---
 
-func TestSummarizeEvent_TaskRunStarted(t *testing.T) {
+func TestSummarizeEvent_JobRunStarted(t *testing.T) {
 	env := events.Envelope{
-		Type: events.TypeTaskRunStarted,
-		Data: mustJSON(events.TaskRunStartedData{Folder: "/my/repo", Schedule: "daily"}),
+		Type: events.TypeJobRunStarted,
+		Data: mustJSON(events.JobRunStartedData{Folder: "/my/repo", Schedule: "daily"}),
 	}
 	s := summarizeEvent(env)
 	if !strings.Contains(s, "folder=") {
@@ -188,10 +188,10 @@ func TestSummarizeEvent_TaskRunStarted(t *testing.T) {
 	}
 }
 
-func TestSummarizeEvent_TaskRunCompleted(t *testing.T) {
+func TestSummarizeEvent_JobRunCompleted(t *testing.T) {
 	env := events.Envelope{
-		Type: events.TypeTaskRunCompleted,
-		Data: mustJSON(events.TaskRunCompletedData{Status: "ok", DurationMS: 5000}),
+		Type: events.TypeJobRunCompleted,
+		Data: mustJSON(events.JobRunCompletedData{Status: "ok", DurationMS: 5000}),
 	}
 	s := summarizeEvent(env)
 	if !strings.Contains(s, "status=ok") {

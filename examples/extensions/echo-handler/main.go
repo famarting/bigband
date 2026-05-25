@@ -1,6 +1,6 @@
 // echo-handler is a 60-line bigband extension example.
 //
-// It subscribes to task_run.completed and prints a one-line summary for each
+// It subscribes to job_run.completed and prints a one-line summary for each
 // completed run. Demonstrates the full end-to-end shape of an extension:
 //
 //   - dial the daemon's Unix socket
@@ -38,14 +38,14 @@ type reply struct {
 }
 
 type envelope struct {
-	Type     string         `json:"type"`
-	RunID    string         `json:"run_id"`
-	TaskName string         `json:"task_name"`
-	Data     map[string]any `json:"data"`
+	Type    string         `json:"type"`
+	RunID   string         `json:"run_id"`
+	JobName string         `json:"job_name"`
+	Data    map[string]any `json:"data"`
 }
 
 func main() {
-	sock := filepath.Join(os.Getenv("HOME"), ".bigband-tasks", "daemon.sock")
+	sock := filepath.Join(os.Getenv("HOME"), ".bigband", "daemon.sock")
 	conn, err := net.DialTimeout("unix", sock, 2*time.Second)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "dial:", err)
@@ -57,7 +57,7 @@ func main() {
 		Action: "subscribe",
 		Subscribe: map[string]any{
 			"name":  "echo-handler",
-			"types": []string{"task_run.completed"},
+			"types": []string{"job_run.completed"},
 		},
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "send:", err)
@@ -89,6 +89,6 @@ func main() {
 		}
 		status, _ := env.Data["status"].(string)
 		dur, _ := env.Data["duration_ms"].(float64)
-		fmt.Printf("[%s] %s %s in %.0fms\n", env.RunID, env.TaskName, status, dur)
+		fmt.Printf("[%s] %s %s in %.0fms\n", env.RunID, env.JobName, status, dur)
 	}
 }

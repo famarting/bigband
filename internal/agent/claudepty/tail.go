@@ -21,49 +21,50 @@ const pollInterval = 50 * time.Millisecond
 const maxLineLen = 16 * 1024 * 1024
 
 // tailSession follows path from startOffset, parsing newline-delimited JSON
-// records and handing each to visit. It returns when:
+// records and handing each to visit. It returns the byte offset reached when
+// it stops, along with an error if one occurred. Stop conditions:
 //
-//   - visit returns true (the caller indicating the turn is complete)
-//   - ctx is cancelled
+//   - visit returns true (the caller indicating the turn is complete) — err nil
+//   - ctx is cancelled — err is ctx.Err()
 //   - childDead reports the producer process exited before completing
 //   - the file produces malformed JSON or a single line exceeds maxLineLen
 //
 // path may not exist yet — claude creates it lazily once the session begins.
 // In that case we wait (respecting ctx) for it to appear. childDead may be nil
 // when the caller does not need exit detection.
-func tailSession(ctx context.Context, path string, startOffset int64, childDead func() bool, visit func(*sessionRecord) bool) error {
+func tailSession(ctx context.Context, path string, startOffset int64, childDead func() bool, visit func(*sessionRecord) bool) (int64, error) {
 	var (
 		offset = startOffset
 		buf    bytes.Buffer
 	)
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return offset, err
 		}
 		size, exists, err := statSize(path)
 		if err != nil {
-			return fmt.Errorf("stat session file: %w", err)
+			return offset, fmt.Errorf("stat session file: %w", err)
 		}
 		if !exists || size <= offset {
 			// If the producer has exited, one last read attempt above already
 			// captured any final bytes; now bail rather than poll forever.
 			if childDead != nil && childDead() {
-				return errors.New("claude exited before turn completed")
+				return offset, errors.New("claude exited before turn completed")
 			}
 			select {
 			case <-time.After(pollInterval):
 				continue
 			case <-ctx.Done():
-				return ctx.Err()
+				return offset, ctx.Err()
 			}
 		}
 		n, err := readRange(path, offset, size-offset, &buf)
 		if err != nil {
-			return fmt.Errorf("read session file: %w", err)
+			return offset, fmt.Errorf("read session file: %w", err)
 		}
 		offset += n
 		if buf.Len() > maxLineLen {
-			return fmt.Errorf("session line exceeds %d bytes", maxLineLen)
+			return offset, fmt.Errorf("session line exceeds %d bytes", maxLineLen)
 		}
 		for {
 			line, ok := takeLine(&buf)
@@ -80,7 +81,7 @@ func tailSession(ctx context.Context, path string, startOffset int64, childDead 
 				continue
 			}
 			if visit(&rec) {
-				return nil
+				return offset, nil
 			}
 		}
 	}

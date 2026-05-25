@@ -15,35 +15,35 @@ import (
 func NewGetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:               "get <name>",
-		Short:             "Show all config and state details for a task",
+		Short:             "Show all config and state details for a job",
 		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeTaskNames,
+		ValidArgsFunction: completeJobNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return getTask(args[0])
+			return getJob(args[0])
 		},
 	}
 }
 
-func getTask(name string) error {
+func getJob(name string) error {
 	// Look up in config and state in parallel; either alone is sufficient. A
-	// task may be configured-only (added but never run), state-only (an
+	// job may be configured-only (added but never run), state-only (an
 	// ephemeral submit_run that wasn't persisted to config.yaml), or both.
 	cfg, _ := config.Load(paths.Config())
 	st, _ := state.Load()
-	var t *config.Task
+	var j *config.Job
 	if cfg != nil {
-		t = cfg.TaskByName(name)
+		j = cfg.JobByName(name)
 	}
-	ts := st.Get(name)
-	if t == nil && ts.LastRun == nil {
-		return fmt.Errorf("task %q not found in config or state", name)
+	js := st.Get(name)
+	if j == nil && js.LastRun == nil {
+		return fmt.Errorf("job %q not found in config or state", name)
 	}
 
 	nextRun := "-"
 	if reply, err := ipc.Send(ipc.Cmd{Action: "status"}); err == nil && reply.OK {
 		var payload ipc.StatusPayload
 		if err := json.Unmarshal(reply.Payload, &payload); err == nil {
-			for _, s := range payload.Tasks {
+			for _, s := range payload.Jobs {
 				if s.Name == name {
 					nextRun = s.NextRun
 					break
@@ -69,61 +69,82 @@ func getTask(name string) error {
 		}
 	}
 
-	fmt.Printf("Task: %s\n", name)
+	fmt.Printf("Job: %s\n", name)
 
-	if t != nil {
+	if j != nil {
 		fmt.Println("\nConfig")
-		sched := t.Schedule
+		sched := j.Schedule
 		if sched == "" {
 			sched = "one-off"
 		}
 		row("schedule", sched)
-		row("folder", t.Folder)
-		row("enabled", boolLabel(t.IsEnabled()))
-		row("worktree", boolLabel(t.ShouldUseWorktree()))
-		row("keep_worktree", boolLabel(t.ShouldKeepWorktree()))
-		row("reuse_worktree", boolLabel(t.ShouldReuseWorktree()))
-		if t.Timeout != nil {
-			row("timeout", t.Timeout.String())
+		row("folder", j.Folder)
+		row("enabled", boolLabel(j.IsEnabled()))
+		row("worktree", boolLabel(j.ShouldUseWorktree()))
+		row("keep_worktree", boolLabel(j.ShouldKeepWorktree()))
+		row("reuse_worktree", boolLabel(j.ShouldReuseWorktree()))
+		if j.Timeout != nil {
+			row("timeout", j.Timeout.String())
 		} else {
 			row("timeout", cfg.Defaults.Timeout.String()+" (default)")
 		}
-		if t.Jitter != nil {
-			row("jitter", t.Jitter.String())
+		if j.Jitter != nil {
+			row("jitter", j.Jitter.String())
 		} else if cfg.Defaults.Jitter.Duration > 0 {
 			row("jitter", cfg.Defaults.Jitter.String()+" (default)")
 		}
-		row("agent", agentDisplay(cfg, t))
-		row("model", inheritedDisplay(t.Model, cfg.Defaults.Model))
-		row("effort", inheritedDisplay(t.Effort, cfg.Defaults.Effort))
-		multirow("pre_exec", t.PreExec)
-		multirow("post_exec", t.PostExec)
-		if len(t.ExtraClaudeFlags) > 0 {
-			row("extra_claude_flags", strings.Join(t.ExtraClaudeFlags, " "))
+		row("agent", agentDisplay(cfg, j))
+		row("model", inheritedDisplay(j.Model, cfg.Defaults.Model))
+		row("effort", inheritedDisplay(j.Effort, cfg.Defaults.Effort))
+		multirow("pre_exec", j.PreExec)
+		multirow("post_exec", j.PostExec)
+		if len(j.ExtraClaudeFlags) > 0 {
+			row("extra_claude_flags", strings.Join(j.ExtraClaudeFlags, " "))
 		}
 		fmt.Printf("\n  prompt:\n")
-		for line := range strings.SplitSeq(strings.TrimRight(t.Prompt, "\n"), "\n") {
+		for line := range strings.SplitSeq(strings.TrimRight(j.Prompt, "\n"), "\n") {
 			fmt.Printf("    %s\n", line)
 		}
 	} else {
 		// Ephemeral one-off: not in config.yaml, only state knows it.
 		fmt.Println("\nEphemeral (not in config.yaml)")
-		row("folder", dash(ts.Folder))
+		row("folder", dash(js.Folder))
+		row("agent", dash(js.Agent))
+		if js.Model != "" {
+			row("model", js.Model)
+		}
+		if js.Effort != "" {
+			row("effort", js.Effort)
+		}
+		if js.Timeout != "" {
+			row("timeout", js.Timeout)
+		}
+		if js.Worktree != nil {
+			row("worktree", boolLabel(*js.Worktree))
+		}
+		multirow("pre_exec", js.PreExec)
+		multirow("post_exec", js.PostExec)
+		if js.Prompt != "" {
+			fmt.Printf("\n  prompt:\n")
+			for line := range strings.SplitSeq(strings.TrimRight(js.Prompt, "\n"), "\n") {
+				fmt.Printf("    %s\n", line)
+			}
+		}
 	}
 
 	fmt.Println("\nState")
-	row("status", dash(string(ts.LastStatus)))
-	if ts.LastRun != nil {
-		row("last_run", ts.LastRun.Local().Format("2006-01-02 15:04:05"))
+	row("status", dash(string(js.LastStatus)))
+	if js.LastRun != nil {
+		row("last_run", js.LastRun.Local().Format("2006-01-02 15:04:05"))
 	} else {
 		row("last_run", "-")
 	}
-	row("duration", dash(ts.LastDuration))
+	row("duration", dash(js.LastDuration))
 	row("next_run", nextRun)
-	row("last_log", dash(ts.LastLog))
-	row("last_reply", dash(ts.LastReplyFile))
-	row("worktree", dash(ts.WorktreePath))
-	row("session_id", dash(ts.SessionID))
+	row("last_log", dash(js.LastLog))
+	row("last_reply", dash(js.LastReplyFile))
+	row("worktree", dash(js.WorktreePath))
+	row("session_id", dash(js.SessionID))
 
 	return nil
 }
@@ -142,11 +163,11 @@ func dash(s string) string {
 	return s
 }
 
-// inheritedDisplay renders a string-valued task field, falling back to the
+// inheritedDisplay renders a string-valued job field, falling back to the
 // defaults value with a "(default)" tag, or "-" when neither is set.
-func inheritedDisplay(taskVal, defaultVal string) string {
-	if taskVal != "" {
-		return taskVal
+func inheritedDisplay(jobVal, defaultVal string) string {
+	if jobVal != "" {
+		return jobVal
 	}
 	if defaultVal != "" {
 		return defaultVal + " (default)"
@@ -154,12 +175,12 @@ func inheritedDisplay(taskVal, defaultVal string) string {
 	return "-"
 }
 
-// agentDisplay renders the resolved agent for a task, tagging where the value
-// comes from: explicit task field, defaults.agent, or the built-in fallback.
-func agentDisplay(cfg *config.Config, t *config.Task) string {
+// agentDisplay renders the resolved agent for a job, tagging where the value
+// comes from: explicit job field, defaults.agent, or the built-in fallback.
+func agentDisplay(cfg *config.Config, j *config.Job) string {
 	switch {
-	case t.Agent != "":
-		return t.Agent
+	case j.Agent != "":
+		return j.Agent
 	case cfg.Defaults.Agent != "":
 		return cfg.Defaults.Agent + " (default)"
 	default:

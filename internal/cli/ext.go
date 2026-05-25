@@ -56,7 +56,7 @@ func newExtListCmd() *cobra.Command {
 				return fmt.Errorf("decoding reply: %w", err)
 			}
 			if len(payload.Extensions) == 0 {
-				fmt.Println("(no extensions registered — drop a manifest at ~/.bigband-tasks/extensions/<name>/manifest.yaml)")
+				fmt.Println("(no extensions registered — drop a manifest at ~/.bigband/extensions/<name>/manifest.yaml)")
 				return nil
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
