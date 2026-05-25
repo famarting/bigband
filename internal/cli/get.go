@@ -98,9 +98,6 @@ func getJob(name string) error {
 		row("effort", inheritedDisplay(j.Effort, cfg.Defaults.Effort))
 		multirow("pre_exec", j.PreExec)
 		multirow("post_exec", j.PostExec)
-		if len(j.ExtraClaudeFlags) > 0 {
-			row("extra_claude_flags", strings.Join(j.ExtraClaudeFlags, " "))
-		}
 		fmt.Printf("\n  prompt:\n")
 		for line := range strings.SplitSeq(strings.TrimRight(j.Prompt, "\n"), "\n") {
 			fmt.Printf("    %s\n", line)

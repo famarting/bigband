@@ -85,24 +85,23 @@ type Defaults struct {
 
 // Job is a single scheduled Claude Code job.
 type Job struct {
-	Name             string    `yaml:"name"`
-	Schedule         string    `yaml:"schedule"`
-	Folder           string    `yaml:"folder"`
-	Enabled          *bool     `yaml:"enabled"`
-	Worktree         *bool     `yaml:"worktree"`
-	KeepWorktree     *bool     `yaml:"keep_worktree"`
-	ReuseWorktree    *bool     `yaml:"reuse_worktree"`
-	PreExec          []string  `yaml:"pre_exec"`
-	PostExec         []string  `yaml:"post_exec"`
-	Prompt           string    `yaml:"prompt"`
-	Timeout          *Duration `yaml:"timeout"`
-	Jitter           *Duration `yaml:"jitter"`
-	Model            string    `yaml:"model"`
-	Effort           string    `yaml:"effort"`
+	Name          string    `yaml:"name"`
+	Schedule      string    `yaml:"schedule"`
+	Folder        string    `yaml:"folder"`
+	Enabled       *bool     `yaml:"enabled"`
+	Worktree      *bool     `yaml:"worktree"`
+	KeepWorktree  *bool     `yaml:"keep_worktree"`
+	ReuseWorktree *bool     `yaml:"reuse_worktree"`
+	PreExec       []string  `yaml:"pre_exec"`
+	PostExec      []string  `yaml:"post_exec"`
+	Prompt        string    `yaml:"prompt"`
+	Timeout       *Duration `yaml:"timeout"`
+	Jitter        *Duration `yaml:"jitter"`
+	Model         string    `yaml:"model"`
+	Effort        string    `yaml:"effort"`
 	// Agent selects the agent provider for this job. Empty falls back to
 	// Defaults.Agent and then to DefaultAgent ("claude").
-	Agent            string   `yaml:"agent,omitempty"`
-	ExtraClaudeFlags []string `yaml:"extra_claude_flags"`
+	Agent string `yaml:"agent,omitempty"`
 
 	// Resolved fields — populated after Validate.
 	cronExpr       string

@@ -229,9 +229,6 @@ func addJobWizard(seed *config.Job) error {
 		if seed.Jitter != nil {
 			job["jitter"] = seed.Jitter.String()
 		}
-		if len(seed.ExtraClaudeFlags) > 0 {
-			job["extra_claude_flags"] = seed.ExtraClaudeFlags
-		}
 	}
 
 	fmt.Println()

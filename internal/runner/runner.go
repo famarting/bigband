@@ -195,7 +195,7 @@ func Run(ctx context.Context, cfg *config.Config, job *config.Job, st *state.Sta
 			WorkDir:    runDir,
 			Model:      cfg.EffectiveModel(job),
 			Effort:     cfg.EffectiveEffort(job),
-			ExtraFlags: job.ExtraClaudeFlags,
+			ExtraFlags: []string{},
 			LogWriter:  lf,
 			Live:       out,
 		}

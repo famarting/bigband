@@ -1,6 +1,6 @@
 # Extending bigband
 
-bigband core is a generic Claude Code session orchestrator. Anything beyond that — Slack mirroring, webhooks, reporting dashboards, custom UIs — lives in **separate processes** that talk to bigband through three documented contracts:
+bigband core is a generic coding agent session orchestrator. Anything beyond that — Slack mirroring, webhooks, reporting dashboards, custom UIs — lives in **separate processes** that talk to bigband through three documented contracts:
 
 1. **IPC** — a Unix-socket JSON protocol for triggering and inspecting runs
 2. **Events** — a JSONL append-only stream + live IPC subscribe channel for lifecycle notifications
@@ -59,7 +59,7 @@ Reply:
 { "ok": true, "payload": {"run_id": "oneoff-2026-05-09T15-00-00Z/...", "job_name": "oneoff-..."} }
 ```
 
-To **resume** a previous Claude session with a new prompt — the path used for follow-up replies — set `parent_session_id`. Pass the same `folder` you originally ran in (or its worktree path with `worktree: false` if you want to land in the same workspace):
+To **resume** a previous coding session with a new prompt — the path used for follow-up replies — set `parent_session_id`. Pass the same `folder` you originally ran in (or its worktree path with `worktree: false` if you want to land in the same workspace):
 
 ```json
 {
@@ -152,7 +152,7 @@ The file is the **ground truth**. The subscribe stream is the same data delivere
 | `~/.bigband/config.yaml` | YAML | Jobs/templates/defaults. Hot-reloaded on change. **Never write here from an extension** — submit ephemeral runs via IPC instead. |
 | `~/.bigband/state.json` | JSON | Per-job: `last_run`, `last_status`, `last_duration`, `last_log`, `last_reply_file`, `worktree_path`, `session_id`, `folder`. |
 | `~/.bigband/logs/<job>/<ts>.log` | text | Per-run log: pre_exec output, stream-json render, post_exec output. |
-| `~/.bigband/logs/<job>/<ts>.reply.txt` | text | Claude's final assistant message for that run. Empty/missing if the run ended on a tool call. |
+| `~/.bigband/logs/<job>/<ts>.reply.txt` | text | Agent's final assistant message for that run. Empty/missing if the run ended on a tool call. |
 | `~/.bigband/events.jsonl` | NDJSON | Lifecycle events. Append-only. |
 | `~/.bigband/extensions/<name>/` | any | Reserved for extension-private config and state. Bigband itself ignores it. |
 
@@ -165,7 +165,7 @@ Existing `post_exec` shell commands receive these env vars (cheap fallback when 
 | `BIGBAND_JOB` | job name |
 | `BIGBAND_WORKTREE` | worktree path (empty when no worktree) |
 | `BIGBAND_REPLY_FILE` | path to `.reply.txt` (empty when no final message) |
-| `BIGBAND_SESSION_ID` | Claude session id captured during the run |
+| `BIGBAND_SESSION_ID` | Agent session id captured during the run |
 
 A complete Slack-out integration can be done with only `post_exec` and `BIGBAND_REPLY_FILE` — no event bus required. Use the events bus when you need cross-job routing or stateful behaviour like Slack thread continuity.
 
@@ -197,13 +197,3 @@ If you're building an extension, these principles will keep you on the path that
 4. **Stay a separate process.** A Slack outage shouldn't take the bigband daemon down. Crash and restart freely.
 5. **Persist your own state.** Bigband stores nothing about your extension. Use `extensions/<name>/state.*` and reconstruct from `events.jsonl` if your state file is missing.
 6. **Use replay across restarts.** Subscribe with `since=<RFC3339>` after your last-seen event so the daemon replays anything you missed before transitioning to live. Delivery is at-least-once; dedup by `event_id` if duplicates would matter. The bundled `bigband-slack` does exactly this — see `cmd/bigband-slack/start.go` for the pattern.
-
----
-
-## What's not yet in v1
-
-- **Per-tool-call progress events** — `claude.assistant_text` / `claude.tool_call` envelopes for live streaming. Deferred to v2.
-- **Skills directory** — extensions cannot install Claude Code skills. (Claude Code already loads `.claude/skills/` from worktrees; bigband stays out of it.)
-- **Capability/permission enforcement on extensions** — extensions are trusted local processes in v1. The `capabilities:` field in manifests, when added, will be advisory.
-
-When any of these grows up, the existing contracts won't change — only new fields and types will be added, and `schema_version` bumped.

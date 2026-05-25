@@ -331,9 +331,6 @@ func addTemplateWizard(seed *config.Job) error {
 		if seed.Jitter != nil {
 			tmpl["jitter"] = seed.Jitter.String()
 		}
-		if len(seed.ExtraClaudeFlags) > 0 {
-			tmpl["extra_claude_flags"] = seed.ExtraClaudeFlags
-		}
 	}
 
 	return appendTemplate(tmpl)
