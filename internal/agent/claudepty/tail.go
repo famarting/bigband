@@ -37,9 +37,19 @@ func tailSession(ctx context.Context, path string, startOffset int64, childDead 
 		offset = startOffset
 		buf    bytes.Buffer
 	)
+	// resumable is the offset to report on any stop where the caller may tail
+	// again from where we left off (visit returned true, ctx cancel, child
+	// death). offset counts every byte read from disk, but buf may still hold
+	// bytes we haven't handed to visit: complete lines that arrived in the same
+	// read burst after the stopping line, and/or a partial, not-yet-newline-
+	// terminated trailing line. Rewinding by buf.Len() points at the first such
+	// unconsumed byte so the next call re-reads it, rather than resuming past it
+	// (which would drop whole records, or corrupt a partial line into
+	// unparseable JSON that is then silently skipped).
+	resumable := func() int64 { return offset - int64(buf.Len()) }
 	for {
 		if err := ctx.Err(); err != nil {
-			return offset, err
+			return resumable(), err
 		}
 		size, exists, err := statSize(path)
 		if err != nil {
@@ -49,13 +59,13 @@ func tailSession(ctx context.Context, path string, startOffset int64, childDead 
 			// If the producer has exited, one last read attempt above already
 			// captured any final bytes; now bail rather than poll forever.
 			if childDead != nil && childDead() {
-				return offset, errors.New("claude exited before turn completed")
+				return resumable(), errors.New("claude exited before turn completed")
 			}
 			select {
 			case <-time.After(pollInterval):
 				continue
 			case <-ctx.Done():
-				return offset, ctx.Err()
+				return resumable(), ctx.Err()
 			}
 		}
 		n, err := readRange(path, offset, size-offset, &buf)
@@ -81,7 +91,7 @@ func tailSession(ctx context.Context, path string, startOffset int64, childDead 
 				continue
 			}
 			if visit(&rec) {
-				return offset, nil
+				return resumable(), nil
 			}
 		}
 	}

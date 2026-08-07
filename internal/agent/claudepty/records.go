@@ -210,9 +210,33 @@ func toolResultText(b *contentBlock) string {
 	return sb.String()
 }
 
-// isBackgroundBashInput reports whether a Bash tool_use input requests
-// run_in_background:true. Other booleans in the input are ignored.
-func isBackgroundBashInput(input json.RawMessage) bool {
+// asyncAgentMarker is the leading text of the tool_result the Agent tool
+// emits when it dispatches a subagent asynchronously — the subagent runs in
+// the background and reports completion later via a task-notification. Unlike
+// Bash's run_in_background, this async dispatch is NOT signalled in the
+// tool_use input (a background Agent's input is indistinguishable from a
+// synchronous one: description/prompt/subagent_type only), so the only
+// reliable signal is the result text. A synchronous Agent call instead returns
+// the subagent's actual output here, which won't contain this marker.
+const asyncAgentMarker = "Async agent launched successfully"
+
+// isAsyncAgentLaunch reports whether a tool_result text is the Agent tool's
+// async-dispatch acknowledgement. When true, the corresponding tool_use is a
+// background task that will drain via a later task-notification.
+//
+// This is a substring match against model-adjacent text, so a false positive
+// is theoretically possible (e.g. a synchronous subagent whose own output
+// quotes this exact phrase). The blast radius is bounded: the worst case is
+// Phase 2a waiting out deferredMaxWait for a notification that never arrives,
+// never a wrong FinalMessage — so a cheap contains-check is the right tradeoff.
+func isAsyncAgentLaunch(resultText string) bool {
+	return strings.Contains(resultText, asyncAgentMarker)
+}
+
+// isBackgroundToolInput reports whether a tool_use input requests
+// run_in_background:true. This is Bash's async-dispatch signal (Agent uses the
+// result-text marker above instead). Other booleans in the input are ignored.
+func isBackgroundToolInput(input json.RawMessage) bool {
 	if len(input) == 0 {
 		return false
 	}

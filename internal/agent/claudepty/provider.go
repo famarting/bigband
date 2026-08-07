@@ -11,10 +11,16 @@
 //     from its size at spawn time.
 //  3. Surface assistant text blocks live as they appear, and treat
 //     system/turn_duration as a SOFT completion: if Claude scheduled deferred
-//     work in that same turn (Bash run_in_background:true, or ScheduleWakeup),
-//     keep tailing past turn_duration so the bg processes — which die with
-//     claude — get a chance to actually run, and any follow-up assistant
-//     turn that lands during the wait gets captured. Bound by deferredMaxWait.
+//     work in that same turn (Bash or Agent with run_in_background:true, or
+//     ScheduleWakeup), keep tailing past turn_duration so the bg processes —
+//     which die with claude — get a chance to actually run. This happens in
+//     two sub-phases: Phase 2a waits for the background work to drain, then
+//     Phase 2b waits for the follow-up "synthesis" turn the completion
+//     notifications trigger — the turn in which claude reads the results and
+//     composes its real final message. Capturing that turn (not the pre-drain
+//     lead-in) is what makes FinalMessage correct. Bound by deferredMaxWait,
+//     with Phase 2b also giving up after a quiet window (synthesisQuietWindow)
+//     when no follow-up turn materialises.
 //
 // ScheduleWakeup is honoured: its parameters are parsed from the tool_use
 // block in the JSONL and surfaced as Result.Wakeup, so the runner re-invokes
@@ -57,6 +63,16 @@ const settleAfterTurn = 1200 * time.Millisecond
 // enough to cover realistic Drive-polling / CI-watching loops; short enough
 // to bound runaway jobs. Currently not user-configurable.
 const deferredMaxWait = 30 * time.Minute
+
+// synthesisQuietWindow bounds how long Phase 2b waits with no new session
+// records before concluding that no follow-up "synthesis" turn is coming.
+// After background work drains, the completion notifications normally prompt
+// claude to consume the results and compose its real final message within a
+// few seconds; if nothing is written for this long we assume the background
+// work was fire-and-forget (no follow-up turn) and stop. Progress resets the
+// window, so a genuinely long synthesis turn is still captured in full (up to
+// the overall deferredMaxWait budget).
+const synthesisQuietWindow = 45 * time.Second
 
 func init() {
 	agent.Register(provider{})
@@ -134,28 +150,71 @@ func (provider) Run(ctx context.Context, req agent.Request) (agent.Result, error
 		bannerf(log, live, "claude-pty: aborted: %v", tailErr)
 		return agent.Result{
 			SessionID:    sessionID,
-			FinalMessage: state.lastSeenText,
+			FinalMessage: state.finalMessage(),
 			Wakeup:       state.agentWakeup(),
 		}, tailErr
 	}
 
 	// Phase 2: if Claude scheduled deferred work in this turn, keep tailing
-	// past turn_duration so any background bash actually gets to run (those
-	// processes are in claude's process group and would die at EOT). Any
-	// follow-up assistant turns that land during the wait also get captured;
-	// state.visit returns true again when pendingBG drains to zero. Otherwise
-	// the deferCtx deadline ends the wait.
+	// past turn_duration so any background task actually gets to run (those
+	// processes are in claude's process group and would die at EOT). This runs
+	// as repeated drain→synthesis cycles: a synthesis turn may itself dispatch
+	// a fresh round of background work, and we must not exit while any is still
+	// outstanding. The whole of Phase 2 shares a single deferredMaxWait budget
+	// (not one per sub-phase), enforced via the absolute deferDeadline.
 	if len(state.pendingBG) > 0 {
-		bannerf(log, live, "claude-pty: %d background task(s) still running; deferring exit up to %s", len(state.pendingBG), deferredMaxWait)
 		state.deferring = true
-		state.turnDone = false
-		deferCtx, cancel := context.WithTimeout(ctx, deferredMaxWait)
-		_, _ = tailSession(deferCtx, jsonlPath, offset, pty.exited, state.visit)
-		cancel()
-		if len(state.pendingBG) == 0 {
+		deferDeadline := time.Now().Add(deferredMaxWait)
+		for len(state.pendingBG) > 0 {
+			// Stop deferring when the overall budget elapses, the parent
+			// (job-level) context is cancelled or hits its own deadline, or
+			// claude has died. In the latter two cases tailSession returns
+			// instantly, so a guard that watched only the wall-clock deadline
+			// would busy-spin this loop for the rest of deferredMaxWait — check
+			// all three causes here so a non-draining round always breaks.
+			if !time.Now().Before(deferDeadline) || ctx.Err() != nil || pty.exited() {
+				bannerf(log, live, "claude-pty: deferred wait ended; %d background task(s) still pending", len(state.pendingBG))
+				break
+			}
+			bannerf(log, live, "claude-pty: %d background task(s) still running; deferring exit up to %s", len(state.pendingBG), deferredMaxWait)
+			// Phase 2a: keep claude alive until the current batch drains. visit
+			// returns true the moment pendingBG hits zero.
+			state.awaitingSynthesis = false
+			state.turnDone = false
+			prevOffset := offset
+			drainCtx, cancel := context.WithDeadline(ctx, deferDeadline)
+			var drainErr error
+			offset, drainErr = tailSession(drainCtx, jsonlPath, offset, pty.exited, state.visit)
+			cancel()
+			if len(state.pendingBG) > 0 {
+				// Batch didn't fully drain. Deadline, parent-ctx cancel, and
+				// claude exiting are all caught by the guard at the top of the
+				// loop. But any other error that returns with no progress —
+				// e.g. the session file became permanently unreadable while
+				// claude is still alive — would otherwise busy-spin, so treat
+				// "errored and read nothing" as unable to proceed and break.
+				if drainErr != nil && offset == prevOffset {
+					bannerf(log, live, "claude-pty: deferred wait cannot proceed (%v); %d background task(s) still pending", drainErr, len(state.pendingBG))
+					break
+				}
+				continue
+			}
 			bannerf(log, live, "claude-pty: background work complete")
-		} else {
-			bannerf(log, live, "claude-pty: deferred-wait deadline reached; %d background task(s) still pending", len(state.pendingBG))
+			// Phase 2b: draining does NOT mean claude is done — the completion
+			// notifications prompt it to read the results and compose its real
+			// final message in a follow-up turn. Returning now would capture
+			// the pre-drain lead-in ("...let me read the results") instead of
+			// the synthesis. Wait for that follow-up turn's turn_duration,
+			// giving up only after synthesisQuietWindow of no new records so
+			// fire-and-forget background work (no follow-up turn) doesn't idle
+			// out the rest of the budget. If that synthesis turn dispatched a
+			// new round of background work, the outer loop re-enters Phase 2a.
+			offset = state.awaitSynthesis(ctx, deferDeadline, jsonlPath, offset, pty.exited)
+			if state.turnDone {
+				bannerf(log, live, "claude-pty: synthesis turn captured")
+			} else {
+				bannerf(log, live, "claude-pty: no synthesis turn within %s; using last completed turn", synthesisQuietWindow)
+			}
 		}
 	}
 
@@ -173,7 +232,7 @@ func (provider) Run(ctx context.Context, req agent.Request) (agent.Result, error
 	pty.sendEOT()
 	return agent.Result{
 		SessionID:    sessionID,
-		FinalMessage: state.lastSeenText,
+		FinalMessage: state.finalMessage(),
 		Wakeup:       state.agentWakeup(),
 	}, nil
 }
@@ -187,10 +246,22 @@ type runState struct {
 	wakeup       *wakeupRequest
 	lastSeenText string
 	turnDone     bool
-	// deferring is set once Phase 2 starts. In that mode visit returns true
-	// when pendingBG drains to zero; turn_duration is informational only,
-	// since a follow-up turn may still arrive.
+	// deferring is set once Phase 2 starts. In that mode a turn_duration no
+	// longer ends the tail on its own: Phase 2a keeps tailing until pendingBG
+	// drains to zero, and Phase 2b (awaitingSynthesis) keeps tailing until the
+	// follow-up synthesis turn produces its own turn_duration.
 	deferring bool
+	// awaitingSynthesis is set for Phase 2b, after background work has drained.
+	// The completion notifications trigger a follow-up turn in which claude
+	// composes its real final message; in this mode visit returns true on the
+	// next turn_duration (the synthesis turn's terminal) rather than on the
+	// now-empty pendingBG set.
+	awaitingSynthesis bool
+	// finalText is lastSeenText snapshotted at each turn_duration, i.e. the
+	// last assistant text of the most recently *completed* turn. FinalMessage
+	// prefers this over lastSeenText so a mid-turn lead-in ("...let me read the
+	// results") that never reached a turn boundary can't win.
+	finalText string
 	// totalOutputTokens accumulates output_tokens across every assistant
 	// message in the run so the turn-complete banner can report the
 	// cumulative cost.
@@ -232,7 +303,12 @@ func (s *runState) visit(rec *sessionRecord) bool {
 				s.wakeup = w
 			}
 		case "Bash":
-			if b.ID != "" && isBackgroundBashInput(b.Input) {
+			// Background bash (run_in_background:true) returns immediately and
+			// reports completion later as a task-notification attachment
+			// (drained by bgCompletionToolUseID below). Background Agent
+			// dispatches look synchronous in the input and are detected from
+			// their tool_result instead — see the toolResults loop below.
+			if b.ID != "" && isBackgroundToolInput(b.Input) {
 				s.pendingBG[b.ID] = struct{}{}
 			}
 		case "TodoWrite":
@@ -245,6 +321,14 @@ func (s *runState) visit(rec *sessionRecord) bool {
 		emitToolUse(s.log, s.live, b)
 	}
 	for _, r := range toolResults(rec) {
+		// A background (async) Agent dispatch is only detectable here: its
+		// tool_use input is indistinguishable from a synchronous call, but the
+		// result acknowledges an async launch. Track it so Phase 2 waits for
+		// the subagent's eventual task-notification rather than exiting on the
+		// pre-result turn.
+		if r.ToolUseID != "" && isAsyncAgentLaunch(toolResultText(&r)) {
+			s.pendingBG[r.ToolUseID] = struct{}{}
+		}
 		emitToolResult(s.log, s.live, r)
 	}
 	if u := assistantUsage(rec); u != nil {
@@ -258,17 +342,50 @@ func (s *runState) visit(rec *sessionRecord) bool {
 	}
 	if isTurnTerminal(rec) {
 		s.turnDone = true
+		// Snapshot the text of this now-completed turn; FinalMessage prefers it.
+		s.finalText = s.lastSeenText
 		if rec.DurationMs > 0 {
 			s.turnDurationMs = rec.DurationMs
 		}
 		if !s.deferring {
-			return true
+			return true // Phase 1: first turn complete.
+		}
+		if s.awaitingSynthesis {
+			return true // Phase 2b: the post-drain synthesis turn finished.
 		}
 	}
-	if s.deferring && len(s.pendingBG) == 0 {
+	// Phase 2a: stop as soon as background work drains so the caller can start
+	// Phase 2b. Not while awaitingSynthesis — that phase exits on turn_duration.
+	if s.deferring && !s.awaitingSynthesis && len(s.pendingBG) == 0 {
 		return true
 	}
 	return false
+}
+
+// awaitSynthesis runs Phase 2b: after background work has drained, tail for the
+// follow-up turn in which claude composes its real final message. It returns
+// the byte offset reached. It stops when that turn produces a turn_duration
+// (setting turnDone via visit), or after synthesisQuietWindow elapses with no
+// new bytes written — the signal that no follow-up turn is coming. Any new
+// bytes reset the quiet window, so a long synthesis turn is captured in full,
+// bounded by the shared deferDeadline (Phase 2's overall budget).
+func (s *runState) awaitSynthesis(ctx context.Context, deferDeadline time.Time, path string, offset int64, childDead func() bool) int64 {
+	s.awaitingSynthesis = true
+	s.turnDone = false
+	overallCtx, cancelOverall := context.WithDeadline(ctx, deferDeadline)
+	defer cancelOverall()
+	for {
+		quietCtx, cancelQuiet := context.WithTimeout(overallCtx, synthesisQuietWindow)
+		newOffset, _ := tailSession(quietCtx, path, offset, childDead, s.visit)
+		cancelQuiet()
+		progressed := newOffset > offset
+		offset = newOffset
+		// Synthesis turn completed, overall budget/job context expired, or a
+		// full quiet window passed with no new bytes — in every case, stop.
+		if s.turnDone || overallCtx.Err() != nil || !progressed {
+			return offset
+		}
+	}
 }
 
 // turnSummary builds the "tokens / context / duration" tail appended to the
@@ -303,6 +420,17 @@ func humanTokens(n int) string {
 	default:
 		return fmt.Sprintf("%d", n)
 	}
+}
+
+// finalMessage returns the message to surface as Result.FinalMessage. It
+// prefers finalText — the last assistant text of the most recently completed
+// turn — falling back to lastSeenText only when no turn ever terminated (e.g.
+// the abort path, where finalText is still empty).
+func (s *runState) finalMessage() string {
+	if s.finalText != "" {
+		return s.finalText
+	}
+	return s.lastSeenText
 }
 
 // agentWakeup converts the captured wakeupRequest (delaySeconds) into the

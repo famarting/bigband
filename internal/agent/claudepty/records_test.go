@@ -35,22 +35,48 @@ func TestParseWakeup(t *testing.T) {
 	}
 }
 
-func TestIsBackgroundBashInput(t *testing.T) {
+func TestIsBackgroundToolInput(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 		want  bool
 	}{
-		{"explicit true", `{"command":"sleep 9","run_in_background":true}`, true},
-		{"explicit false", `{"command":"ls","run_in_background":false}`, false},
-		{"missing", `{"command":"ls"}`, false},
+		{"bash explicit true", `{"command":"sleep 9","run_in_background":true}`, true},
+		{"bash explicit false", `{"command":"ls","run_in_background":false}`, false},
+		{"bash missing", `{"command":"ls"}`, false},
+		// A real Agent input never carries run_in_background (it is async by
+		// default); the flag is honoured generically if present, but Agent
+		// background detection actually keys off the tool_result — see
+		// TestIsAsyncAgentLaunch.
+		{"agent typical (no flag)", `{"description":"d","subagent_type":"general-purpose","prompt":"p"}`, false},
 		{"empty", ``, false},
 		{"malformed", `garbage`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isBackgroundBashInput(json.RawMessage(tt.input)); got != tt.want {
-				t.Errorf("isBackgroundBashInput(%q) = %v, want %v", tt.input, got, tt.want)
+			if got := isBackgroundToolInput(json.RawMessage(tt.input)); got != tt.want {
+				t.Errorf("isBackgroundToolInput(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsAsyncAgentLaunch(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"async launch ack", "Async agent launched successfully.\nagentId: a0abc (internal ID)", true},
+		{"async launch mid-text", "note: Async agent launched successfully for the fetch", true},
+		{"synchronous output", "Both queries complete. Here are the results.\n## TASK 1", false},
+		{"empty", "", false},
+		{"unrelated", "Command running in the background with ID bhq", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAsyncAgentLaunch(tt.text); got != tt.want {
+				t.Errorf("isAsyncAgentLaunch(%q) = %v, want %v", tt.text, got, tt.want)
 			}
 		})
 	}
