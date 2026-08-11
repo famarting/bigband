@@ -100,18 +100,20 @@ func newMirrorCmd() *cobra.Command {
 				return fmt.Errorf("slack.bot_token is empty")
 			}
 			api := slack.New(bot)
-			opts := []slack.MsgOption{
-				slack.MsgOptionText(text, false),
-				slack.MsgOptionDisableLinkUnfurl(),
+			for i, chunk := range splitForSlack(text, slackMaxMessageChars) {
+				opts := []slack.MsgOption{
+					slack.MsgOptionText(chunk, false),
+					slack.MsgOptionDisableLinkUnfurl(),
+				}
+				if threadTS != "" {
+					opts = append(opts, slack.MsgOptionTS(threadTS))
+				}
+				_, ts, err := api.PostMessage(postChannel, opts...)
+				if err != nil {
+					return fmt.Errorf("PostMessage chunk %d: %w", i+1, err)
+				}
+				fmt.Printf("posted: channel=%s ts=%s\n", postChannel, ts)
 			}
-			if threadTS != "" {
-				opts = append(opts, slack.MsgOptionTS(threadTS))
-			}
-			_, ts, err := api.PostMessage(postChannel, opts...)
-			if err != nil {
-				return fmt.Errorf("PostMessage: %w", err)
-			}
-			fmt.Printf("posted: channel=%s ts=%s\n", postChannel, ts)
 			return nil
 		},
 	}

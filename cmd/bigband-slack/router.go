@@ -169,13 +169,29 @@ func (r *Router) handleCompleted(env bigbandext.Envelope) {
 		mode = "slack-originated"
 	}
 	log.Printf("bigband-slack: posting completion job=%s parent=%s channel=%s thread=%q status=%s mode=%s msg_len=%d", env.JobName, parentName, channel, threadTS, data.Status, mode, len(data.FinalMessage))
-	posted, err := r.slack.PostMessage(channel, text, threadTS)
-	if err != nil {
-		log.Printf("bigband-slack: PostMessage failed for job=%s channel=%q: %v", parentName, channel, err)
-		if strings.Contains(err.Error(), "channel_not_found") {
-			log.Printf("bigband-slack: hint — channel_not_found usually means the bot isn't a member of %s. In Slack, run `/invite @<your-app-name>` in that channel.", channel)
+	chunks := splitForSlack(text, slackMaxMessageChars)
+	if len(chunks) > 1 {
+		log.Printf("bigband-slack: splitting completion job=%s into %d messages (msg_len=%d)", parentName, len(chunks), len(text))
+	}
+	// Continuations post at the same level as the first chunk (same threadTS),
+	// so a top-level briefing stays top-level rather than half-hiding in a
+	// thread. Only the first chunk's ts is persisted as the run mapping.
+	var posted string
+	for i, chunk := range chunks {
+		ts, err := r.slack.PostMessage(channel, chunk, threadTS)
+		if err != nil {
+			log.Printf("bigband-slack: PostMessage failed for job=%s channel=%q chunk=%d/%d: %v", parentName, channel, i+1, len(chunks), err)
+			if strings.Contains(err.Error(), "channel_not_found") {
+				log.Printf("bigband-slack: hint — channel_not_found usually means the bot isn't a member of %s. In Slack, run `/invite @<your-app-name>` in that channel.", channel)
+			}
+			if i == 0 {
+				return
+			}
+			break // first chunk landed; keep the mapping so replies still work
 		}
-		return
+		if i == 0 {
+			posted = ts
+		}
 	}
 	if posted == "" {
 		posted = threadTS
