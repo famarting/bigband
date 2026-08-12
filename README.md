@@ -156,6 +156,19 @@ Manage them with `bigband template …` (see commands below).
 
 ### Schedules
 
+**Schedules are always UTC.** The same schedule string fires at the same instant
+on every machine, so a job definition can be shared without meaning something
+different on each laptop. Timezone prefixes (`TZ=`, `CRON_TZ=`) are rejected
+rather than silently honoured. Display is unaffected — `bigband list` shows the
+next run in your own local time.
+
+Two consequences worth knowing before writing one:
+
+- A schedule near midnight UTC can land on a different local day. `0 22 * * 0-4`
+  is Monday-to-Friday 00:00 in CEST.
+- A job stays fixed against UTC across DST, so it drifts an hour against your
+  wall clock twice a year.
+
 bigband accepts three formats:
 
 ```

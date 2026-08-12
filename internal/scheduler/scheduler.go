@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/famarting/bigband/internal/config"
 	"github.com/robfig/cron/v3"
@@ -29,13 +30,17 @@ type Scheduler struct {
 // New returns a running Scheduler. handler is called for each fired job.
 // hasFired is called for one-off jobs to check whether they already ran in a
 // previous session (prevents re-firing after a daemon restart).
+//
+// Schedules are interpreted in UTC, not in the machine's local time, so the
+// same schedule string fires at the same instant on every machine. Display is
+// unaffected: NextRuns formats in local time.
 func New(handler func(*config.Config, *config.Job), hasFired func(string) bool) *Scheduler {
 	s := &Scheduler{
 		entries:     make(map[string]entry),
 		oneOffFired: make(map[string]bool),
 		handler:     handler,
 		hasFired:    hasFired,
-		c:           cron.New(),
+		c:           cron.New(cron.WithLocation(time.UTC)),
 	}
 	s.c.Start()
 	return s

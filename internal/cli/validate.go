@@ -24,6 +24,9 @@ func NewValidateCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("Config OK — %d job(s), %d template(s)\n", len(cfg.Jobs), len(cfg.Templates))
+			if len(cfg.Jobs) > 0 {
+				fmt.Println("Schedules are UTC; `bigband list` shows next runs in local time.")
+			}
 			for _, j := range cfg.Jobs {
 				cronExpr, hasJitter, _ := schedule.Parse(j.Schedule)
 				jitterStr := ""

@@ -37,6 +37,10 @@ func TestParse(t *testing.T) {
 		// Invalid
 		{"not a schedule", "", false, true},
 		{"Weekdays at badtime", "", false, true},
+		// Timezone prefixes: rejected, schedules are always UTC
+		{"CRON_TZ=Europe/Madrid 0 20 * * 1-5", "", false, true},
+		{"TZ=Europe/Madrid 0 20 * * 1-5", "", false, true},
+		{"cron_tz=UTC Weekdays at ~20:00", "", false, true},
 	}
 
 	for _, tc := range tests {

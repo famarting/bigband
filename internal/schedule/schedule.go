@@ -22,7 +22,15 @@ var cronParser = cron.NewParser(
 
 // Parse accepts a schedule string and returns the canonical cron expression
 // plus a hasJitter flag indicating whether the "~" marker was present.
+//
+// Schedules carry no timezone: they are interpreted in UTC by the scheduler.
+// A "TZ=" or "CRON_TZ=" prefix — which robfig/cron would otherwise honour,
+// silently overriding that — is rejected.
 func Parse(s string) (cronExpr string, hasJitter bool, err error) {
+	if tz, ok := tzPrefix(s); ok {
+		return "", false, fmt.Errorf("schedule %q sets a timezone (%s): schedules are always UTC, drop the prefix and convert the time", s, tz)
+	}
+
 	if _, err := cronParser.Parse(s); err == nil {
 		return s, false, nil
 	}
@@ -47,6 +55,21 @@ func Describe(cronExpr string, hasJitter bool, jitter string) string {
 		base += " (±" + jitter + " jitter)"
 	}
 	return base
+}
+
+// tzPrefix reports whether s opens with a robfig/cron timezone prefix, and
+// returns the prefix itself for the error message. Matched case-insensitively
+// so a lowercase attempt gets this error rather than "unrecognised schedule".
+func tzPrefix(s string) (string, bool) {
+	trimmed := strings.TrimSpace(s)
+	upper := strings.ToUpper(trimmed)
+	for _, p := range []string{"CRON_TZ=", "TZ="} {
+		if strings.HasPrefix(upper, p) {
+			field, _, _ := strings.Cut(trimmed, " ")
+			return field, true
+		}
+	}
+	return "", false
 }
 
 // jitterRe matches optional ~ before a time component like "~20:00" or "~9am"

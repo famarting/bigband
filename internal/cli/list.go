@@ -142,7 +142,7 @@ func printJobList(reply *ipc.Reply, all bool) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN\tRUN DIR")
+	fmt.Fprintln(w, "NAME\tSCHEDULE (UTC)\tENABLED\tNEXT RUN (LOCAL)\tRUN DIR")
 	for _, j := range jobs {
 		sched := j.Schedule
 		if sched == "" {
@@ -240,7 +240,7 @@ func printOfflineJobList(all bool) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSCHEDULE\tENABLED\tNEXT RUN\tRUN DIR")
+	fmt.Fprintln(w, "NAME\tSCHEDULE (UTC)\tENABLED\tNEXT RUN (LOCAL)\tRUN DIR")
 	for _, r := range rows {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.name, r.sched, r.enabled, r.nextRun, r.dir)
 	}
