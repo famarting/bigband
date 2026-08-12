@@ -63,7 +63,7 @@ func addJobWizard(seed *config.Job) error {
 	if seed != nil {
 		defaultSched = seed.Schedule
 	}
-	schedPrompt := "Schedule (e.g. 'Weekdays at ~20:00', '@every 1h', '0 8 * * *') — leave blank for one-off"
+	schedPrompt := "Schedule, in UTC (e.g. 'Weekdays at ~20:00', '@every 1h', '0 8 * * *') — leave blank for one-off"
 	if defaultSched != "" {
 		schedPrompt = fmt.Sprintf("%s [%s]", schedPrompt, defaultSched)
 	}

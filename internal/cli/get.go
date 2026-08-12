@@ -74,10 +74,12 @@ func getJob(name string) error {
 	if j != nil {
 		fmt.Println("\nConfig")
 		sched := j.Schedule
+		schedLabel := "schedule (UTC)"
 		if sched == "" {
 			sched = "one-off"
+			schedLabel = "schedule"
 		}
-		row("schedule", sched)
+		row(schedLabel, sched)
 		row("folder", j.Folder)
 		row("enabled", boolLabel(j.IsEnabled()))
 		row("worktree", boolLabel(j.ShouldUseWorktree()))
@@ -132,12 +134,12 @@ func getJob(name string) error {
 	fmt.Println("\nState")
 	row("status", dash(string(js.LastStatus)))
 	if js.LastRun != nil {
-		row("last_run", js.LastRun.Local().Format("2006-01-02 15:04:05"))
+		row("last_run (local)", js.LastRun.Local().Format("2006-01-02 15:04:05"))
 	} else {
-		row("last_run", "-")
+		row("last_run (local)", "-")
 	}
 	row("duration", dash(js.LastDuration))
-	row("next_run", nextRun)
+	row("next_run (local)", nextRun)
 	row("last_log", dash(js.LastLog))
 	row("last_reply", dash(js.LastReplyFile))
 	row("worktree", dash(js.WorktreePath))
