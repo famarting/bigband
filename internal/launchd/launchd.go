@@ -137,20 +137,27 @@ func (s *Service) Install() error {
 	f.Close()
 	fmt.Printf("Wrote %s\n", s.PlistPath())
 
+	// Unload before loading, rather than `launchctl kickstart -k`. kickstart
+	// restarts the process launchd already has in memory; it does not re-read
+	// the plist we just wrote. So with kickstart, neither a changed binary path
+	// nor a changed PATH takes effect — and if the old binary has been deleted
+	// (e.g. moving from ~/bin to $(go env GOPATH)/bin), launchd is left trying
+	// to spawn a file that no longer exists and kickstart blocks waiting for it.
+	// bootout+bootstrap is the only pair that reloads the definition.
 	if alreadyInstalled {
-		uid := strconv.Itoa(os.Getuid())
-		out, err := exec.Command("launchctl", "kickstart", "-k", "gui/"+uid+"/"+s.Label).CombinedOutput()
-		if err != nil {
-			fmt.Printf("WARNING: kickstart failed: %s\n", out)
-		} else {
-			fmt.Printf("%s restarted with new binary.\n", s.Label)
+		if err := s.bootstrapUnload(); err != nil {
+			// Not fatal: the service may not be loaded at all, which is exactly
+			// the state we are trying to reach.
+			fmt.Printf("NOTE: could not unload the running agent (%v); continuing\n", err)
 		}
-		return nil
 	}
 
 	if err := s.bootstrapLoad(); err != nil {
 		fmt.Printf("WARNING: could not load agent automatically: %v\n", err)
-		fmt.Printf("Run manually: launchctl load -w %s\n", s.PlistPath())
+		fmt.Printf("Run manually: launchctl bootout gui/%d/%s; launchctl bootstrap gui/%d %s\n",
+			os.Getuid(), s.Label, os.Getuid(), s.PlistPath())
+	} else if alreadyInstalled {
+		fmt.Printf("%s restarted with %s\n", s.Label, binary)
 	} else {
 		fmt.Printf("%s installed and started.\n", s.Label)
 	}

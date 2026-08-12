@@ -37,8 +37,14 @@ Or build from source:
 ```sh
 git clone https://github.com/famarting/bigband
 cd bigband
-make install   # builds and copies to ~/bin/bigband
+make install   # builds and copies to $(go env GOPATH)/bin/bigband
 ```
+
+`make install` writes to the same directory `go install` does, so building from
+source and installing a pinned commit cannot leave two different bigbands on one
+machine. Override with `make INSTALL_DIR=~/bin install` if you want it elsewhere
+— but pick one place and stay there: the LaunchAgent records the path of
+whichever binary ran `bigband install`.
 
 ## Quick start
 

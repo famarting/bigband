@@ -1,9 +1,20 @@
 BIN              := ./dist/bigband
 SLACK_BIN        := ./dist/bigband-slack
 WAKE_BIN         := ./dist/bigband-wake
-INSTALL          := $(HOME)/bin/bigband
-SLACK_INSTALL    := $(HOME)/bin/bigband-slack
-WAKE_INSTALL     := $(HOME)/bin/bigband-wake
+
+# Install into the same directory `go install` writes to, so a `make install`
+# build and a `go install github.com/famarting/bigband/cmd/...@<sha>` cannot
+# leave two different bigbands on one machine. That drift is not theoretical:
+# it produced a ~/bin copy and a ~/go/bin copy three months and a task->job
+# rename apart, with the LaunchAgent pinned to whichever one ran `bigband
+# install`. Override with `make INSTALL_DIR=/somewhere/else install`.
+INSTALL_DIR      ?= $(shell go env GOBIN)
+ifeq ($(strip $(INSTALL_DIR)),)
+INSTALL_DIR      := $(shell go env GOPATH)/bin
+endif
+INSTALL          := $(INSTALL_DIR)/bigband
+SLACK_INSTALL    := $(INSTALL_DIR)/bigband-slack
+WAKE_INSTALL     := $(INSTALL_DIR)/bigband-wake
 CMD              := ./cmd/bigband
 SLACK_CMD        := ./cmd/bigband-slack
 WAKE_CMD         := ./cmd/bigband-wake
@@ -27,14 +38,17 @@ build-wake:
 build-all: build build-slack build-wake
 
 install: build
+	@mkdir -p $(INSTALL_DIR)
 	install -m 755 $(BIN) $(INSTALL)
 	@echo "Installed $(INSTALL) ($(VERSION))"
 
 install-slack: build-slack
+	@mkdir -p $(INSTALL_DIR)
 	install -m 755 $(SLACK_BIN) $(SLACK_INSTALL)
 	@echo "Installed $(SLACK_INSTALL) ($(VERSION))"
 
 install-wake: build-wake
+	@mkdir -p $(INSTALL_DIR)
 	install -m 755 $(WAKE_BIN) $(WAKE_INSTALL)
 	@echo "Installed $(WAKE_INSTALL) ($(VERSION))"
 

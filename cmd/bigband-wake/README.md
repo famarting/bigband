@@ -24,7 +24,7 @@ Not on macOS, not on AC, or `enabled: false` → bigband-wake is a logging no-op
 ## Install
 
 ```sh
-make install-wake                  # builds + copies to ~/bin/bigband-wake
+make install-wake                  # builds + copies to $(go env GOPATH)/bin/bigband-wake
 bigband-wake init                  # writes config.yaml + manifest.yaml under ~/.bigband/extensions/bigband-wake/
 bigband-wake setup                 # prints the sudoers stanza (does NOT run sudo)
 ```

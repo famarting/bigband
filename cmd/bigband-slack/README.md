@@ -15,7 +15,7 @@ Empty config = does nothing. Mirror rules and trigger channels are explicitly op
 ## Install
 
 ```sh
-make install-slack                 # builds + copies to ~/bin/bigband-slack
+make install-slack                 # builds + copies to $(go env GOPATH)/bin/bigband-slack
 bigband-slack init                 # writes config.yaml + manifest.yaml under ~/.bigband/extensions/bigband-slack/
 ```
 

@@ -16,8 +16,10 @@ command:
     - /bin/bash
     - notify.sh # resolved against working_dir (manifest's parent)
 env:
-    # NOTE: include $HOME/bin if that's where you installed bigband (default for `make install`)
-    PATH: ${env:HOME}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
+    # NOTE: notify.sh shells out to `bigband subscribe`, so this PATH must contain
+    # the directory bigband is installed in. Both `go install` and `make install`
+    # write to $(go env GOPATH)/bin.
+    PATH: ${env:HOME}/go/bin:${env:HOME}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin
     NOTIFY_JOBS: "*"
     # NOTIFY_FAILURES_ONLY: "1"
     # NOTIFY_TITLE_PREFIX: bigband
