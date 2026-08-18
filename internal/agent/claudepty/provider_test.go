@@ -1,8 +1,13 @@
 package claudepty
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -229,5 +234,163 @@ func TestRunState_SidechainAssistantIgnored(t *testing.T) {
 	}
 	if len(s.pendingBG) != 0 {
 		t.Errorf("sidechain bg should not be tracked; got %+v", s.pendingBG)
+	}
+}
+
+// bgBashRec is one assistant record dispatching a background Bash call, and
+// bgDoneRec its completion notification. Together they drive pendingBG in the
+// Phase 2 tests below.
+const (
+	bgBashRec = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"sleep 1","run_in_background":true}}]}}`
+	bgDoneRec = `{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<tool-use-id>toolu_bg</tool-use-id><status>completed</status>"}}`
+)
+
+// withStallWindow shrinks deferredStallWindow for the duration of a test so the
+// Phase 2a waits resolve in milliseconds instead of an hour.
+func withStallWindow(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := deferredStallWindow
+	deferredStallWindow = d
+	t.Cleanup(func() { deferredStallWindow = prev })
+}
+
+// appendLine appends one JSONL record to path, as claude would.
+func appendLine(t *testing.T, path, line string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// deferringState returns a runState already in Phase 2a with one outstanding
+// background task, plus the session file seeded with its dispatch record.
+func deferringState(t *testing.T) (*runState, string, int64) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	appendLine(t, path, bgBashRec)
+	s := newRunState(io.Discard, io.Discard)
+	off, err := tailSession(context.Background(), path, 0, func() bool { return false }, func(r *sessionRecord) bool {
+		s.visit(r)
+		return len(s.pendingBG) > 0 // stop once the dispatch is tracked
+	})
+	if err != nil {
+		t.Fatalf("seed tail: %v", err)
+	}
+	if len(s.pendingBG) != 1 {
+		t.Fatalf("pendingBG = %v, want one outstanding task", s.pendingBG)
+	}
+	s.deferring = true
+	return s, path, off
+}
+
+// TestAwaitDrain_ProgressExtendsPastOneWindow is the regression test for the
+// bug this design fixes: Phase 2 used to share one absolute budget anchored at
+// the first turn_duration, so a run that spent it on productive early work
+// (grooming a backlog, opening a PR) got killed once it finally settled in to
+// wait on CI. Here the session keeps writing records for several windows'
+// worth of wall-clock, with no single gap exceeding one window — the wait must
+// survive all of it and still see the drain.
+func TestAwaitDrain_ProgressExtendsPastOneWindow(t *testing.T) {
+	const (
+		window = 200 * time.Millisecond
+		gap    = 120 * time.Millisecond
+		writes = 5
+	)
+	withStallWindow(t, window)
+	s, path, off := deferringState(t)
+
+	go func() {
+		for i := 0; i < writes; i++ {
+			time.Sleep(gap)
+			appendLine(t, path, `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"still working"}]}}`)
+		}
+		time.Sleep(gap)
+		appendLine(t, path, bgDoneRec)
+	}()
+
+	start := time.Now()
+	_, err := s.awaitDrain(context.Background(), path, off, func() bool { return false })
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("awaitDrain err = %v, want nil (progress should extend the wait)", err)
+	}
+	if len(s.pendingBG) != 0 {
+		t.Errorf("pendingBG = %v, want drained", s.pendingBG)
+	}
+	if elapsed <= window {
+		t.Errorf("elapsed %v <= one window %v; the test did not exercise the extension", elapsed, window)
+	}
+}
+
+// TestAwaitDrain_SilenceEndsWait covers the other side of the contract: with
+// nothing at all written, the wait must end after one full window rather than
+// holding the session open to the job deadline.
+func TestAwaitDrain_SilenceEndsWait(t *testing.T) {
+	const window = 150 * time.Millisecond
+	withStallWindow(t, window)
+	s, path, off := deferringState(t)
+
+	start := time.Now()
+	_, err := s.awaitDrain(context.Background(), path, off, func() bool { return false })
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("awaitDrain err = nil, want a stall error")
+	}
+	if !strings.Contains(err.Error(), "no session activity") {
+		t.Errorf("err = %v, want it to name the inactivity window", err)
+	}
+	if len(s.pendingBG) != 1 {
+		t.Errorf("pendingBG = %v, want the task still outstanding", s.pendingBG)
+	}
+	// One window, not two: a stalled wait must not retry, and must not spin.
+	if elapsed < window || elapsed > 4*window {
+		t.Errorf("elapsed %v, want ~one window (%v)", elapsed, window)
+	}
+}
+
+// TestAwaitDrain_ClaudeExitEndsWait verifies a dead producer ends the wait
+// immediately — its background children died with it, so nothing can drain.
+func TestAwaitDrain_ClaudeExitEndsWait(t *testing.T) {
+	withStallWindow(t, 10*time.Second)
+	s, path, off := deferringState(t)
+
+	start := time.Now()
+	_, err := s.awaitDrain(context.Background(), path, off, func() bool { return true })
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("awaitDrain err = nil, want an exit error")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("elapsed %v; a dead producer should end the wait promptly", elapsed)
+	}
+}
+
+// TestAwaitDrain_ContextCancelEndsWait verifies the job deadline still wins:
+// the sliding window can extend the wait indefinitely on paper, but never past
+// the timeout the runner puts on ctx.
+func TestAwaitDrain_ContextCancelEndsWait(t *testing.T) {
+	withStallWindow(t, time.Hour)
+	s, path, off := deferringState(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := s.awaitDrain(ctx, path, off, func() bool { return false })
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("awaitDrain err = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("elapsed %v; the job deadline should end the wait promptly", elapsed)
 	}
 }

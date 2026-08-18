@@ -18,9 +18,13 @@
 //     Phase 2b waits for the follow-up "synthesis" turn the completion
 //     notifications trigger — the turn in which claude reads the results and
 //     composes its real final message. Capturing that turn (not the pre-drain
-//     lead-in) is what makes FinalMessage correct. Bound by deferredMaxWait,
-//     with Phase 2b also giving up after a quiet window (synthesisQuietWindow)
-//     when no follow-up turn materialises.
+//     lead-in) is what makes FinalMessage correct. Phase 2 is bounded by
+//     progress, not by a fixed budget: each wait gets a fresh
+//     deferredStallWindow that any new session record resets, so an agent that
+//     keeps working holds the session open, while an idle one still times out.
+//     Phase 2b additionally gives up after a shorter quiet window
+//     (synthesisQuietWindow) when no follow-up turn materialises. The job
+//     timeout the runner puts on ctx is the hard bound throughout.
 //
 // ScheduleWakeup is honoured: its parameters are parsed from the tool_use
 // block in the JSONL and surfaced as Result.Wakeup, so the runner re-invokes
@@ -58,11 +62,22 @@ const binary = "claude"
 // (ai-title, permission-mode) so a follow-up resume sees a stable file.
 const settleAfterTurn = 1200 * time.Millisecond
 
-// deferredMaxWait caps how long we keep claude alive past its first
-// turn_duration when Claude scheduled background work in that turn. Long
-// enough to cover realistic Drive-polling / CI-watching loops; short enough
-// to bound runaway jobs. Currently not user-configurable.
-const deferredMaxWait = 30 * time.Minute
+// deferredStallWindow bounds how long we keep claude alive with *no new
+// session records* while background work is still outstanding. It is an
+// inactivity window, not a total budget: every record resets it, so an agent
+// that keeps making progress — draining one batch, reading the results,
+// dispatching the next — holds the session open for as long as it keeps
+// working, and only a genuinely idle session (a background task that never
+// reports, or a hung claude) times out. A single absolute budget instead
+// killed multi-stage runs mid-workflow, because the early productive phases
+// spent the budget the final wait needed.
+//
+// Sized to cover the quiet stretch of a realistic CI-watching poller, which
+// writes nothing to the session between arming the wait and its completion
+// notification. The job's own timeout is the hard bound — the runner puts it
+// on ctx, so Phase 2 can never outlive the run. Currently not
+// user-configurable; a var only so tests can shrink it.
+var deferredStallWindow = 60 * time.Minute
 
 // synthesisQuietWindow bounds how long Phase 2b waits with no new session
 // records before concluding that no follow-up "synthesis" turn is coming.
@@ -71,7 +86,7 @@ const deferredMaxWait = 30 * time.Minute
 // few seconds; if nothing is written for this long we assume the background
 // work was fire-and-forget (no follow-up turn) and stop. Progress resets the
 // window, so a genuinely long synthesis turn is still captured in full (up to
-// the overall deferredMaxWait budget).
+// the job deadline on ctx).
 const synthesisQuietWindow = 45 * time.Second
 
 func init() {
@@ -160,44 +175,30 @@ func (provider) Run(ctx context.Context, req agent.Request) (agent.Result, error
 	// processes are in claude's process group and would die at EOT). This runs
 	// as repeated drain→synthesis cycles: a synthesis turn may itself dispatch
 	// a fresh round of background work, and we must not exit while any is still
-	// outstanding. The whole of Phase 2 shares a single deferredMaxWait budget
-	// (not one per sub-phase), enforced via the absolute deferDeadline.
+	// outstanding. Every cycle gets its own deferredStallWindow rather than
+	// drawing on one shared budget — see the constant — so the bound is the
+	// job deadline on ctx plus a full window of session silence.
 	if len(state.pendingBG) > 0 {
 		state.deferring = true
-		deferDeadline := time.Now().Add(deferredMaxWait)
 		for len(state.pendingBG) > 0 {
-			// Stop deferring when the overall budget elapses, the parent
-			// (job-level) context is cancelled or hits its own deadline, or
-			// claude has died. In the latter two cases tailSession returns
-			// instantly, so a guard that watched only the wall-clock deadline
-			// would busy-spin this loop for the rest of deferredMaxWait — check
-			// all three causes here so a non-draining round always breaks.
-			if !time.Now().Before(deferDeadline) || ctx.Err() != nil || pty.exited() {
+			// Stop deferring when the parent (job-level) context is cancelled
+			// or hits its own deadline, or claude has died. In both cases
+			// tailSession returns instantly, so re-entering the loop would only
+			// spin; awaitDrain checks the same causes, and this guard covers
+			// re-entry after a synthesis turn.
+			if ctx.Err() != nil || pty.exited() {
 				bannerf(log, live, "claude-pty: deferred wait ended; %d background task(s) still pending", len(state.pendingBG))
 				break
 			}
-			bannerf(log, live, "claude-pty: %d background task(s) still running; deferring exit up to %s", len(state.pendingBG), deferredMaxWait)
-			// Phase 2a: keep claude alive until the current batch drains. visit
-			// returns true the moment pendingBG hits zero.
+			bannerf(log, live, "claude-pty: %d background task(s) still running; deferring exit while the session stays active (idle cap %s)", len(state.pendingBG), deferredStallWindow)
+			// Phase 2a: keep claude alive until the current batch drains.
 			state.awaitingSynthesis = false
 			state.turnDone = false
-			prevOffset := offset
-			drainCtx, cancel := context.WithDeadline(ctx, deferDeadline)
 			var drainErr error
-			offset, drainErr = tailSession(drainCtx, jsonlPath, offset, pty.exited, state.visit)
-			cancel()
+			offset, drainErr = state.awaitDrain(ctx, jsonlPath, offset, pty.exited)
 			if len(state.pendingBG) > 0 {
-				// Batch didn't fully drain. Deadline, parent-ctx cancel, and
-				// claude exiting are all caught by the guard at the top of the
-				// loop. But any other error that returns with no progress —
-				// e.g. the session file became permanently unreadable while
-				// claude is still alive — would otherwise busy-spin, so treat
-				// "errored and read nothing" as unable to proceed and break.
-				if drainErr != nil && offset == prevOffset {
-					bannerf(log, live, "claude-pty: deferred wait cannot proceed (%v); %d background task(s) still pending", drainErr, len(state.pendingBG))
-					break
-				}
-				continue
+				bannerf(log, live, "claude-pty: deferred wait cannot proceed (%v); %d background task(s) still pending", drainErr, len(state.pendingBG))
+				break
 			}
 			bannerf(log, live, "claude-pty: background work complete")
 			// Phase 2b: draining does NOT mean claude is done — the completion
@@ -209,7 +210,7 @@ func (provider) Run(ctx context.Context, req agent.Request) (agent.Result, error
 			// fire-and-forget background work (no follow-up turn) doesn't idle
 			// out the rest of the budget. If that synthesis turn dispatched a
 			// new round of background work, the outer loop re-enters Phase 2a.
-			offset = state.awaitSynthesis(ctx, deferDeadline, jsonlPath, offset, pty.exited)
+			offset = state.awaitSynthesis(ctx, jsonlPath, offset, pty.exited)
 			if state.turnDone {
 				bannerf(log, live, "claude-pty: synthesis turn captured")
 			} else {
@@ -362,27 +363,64 @@ func (s *runState) visit(rec *sessionRecord) bool {
 	return false
 }
 
+// awaitDrain runs Phase 2a: keep claude alive until the current batch of
+// background tasks drains. visit returns true the moment pendingBG hits zero.
+//
+// Each tail attempt is bounded by its own deferredStallWindow, and any new
+// session bytes buy a fresh one. That is what keeps a multi-stage run alive: a
+// job that grooms a backlog, opens a PR and only then settles in to watch CI is
+// still making progress the whole time, so the long final wait starts with a
+// full window rather than with whatever a single shared budget had left.
+//
+// It returns the offset reached and a nil error once pendingBG is empty. On any
+// other stop — a full window of silence, the job deadline, claude exiting, an
+// unreadable session file — it returns a non-nil error saying why, with
+// pendingBG still non-empty.
+func (s *runState) awaitDrain(ctx context.Context, path string, offset int64, childDead func() bool) (int64, error) {
+	for {
+		stallCtx, cancel := context.WithTimeout(ctx, deferredStallWindow)
+		newOffset, err := tailSession(stallCtx, path, offset, childDead, s.visit)
+		cancel()
+		progressed := newOffset > offset
+		offset = newOffset
+		switch {
+		case len(s.pendingBG) == 0:
+			return offset, nil
+		case ctx.Err() != nil:
+			return offset, ctx.Err()
+		case childDead != nil && childDead():
+			return offset, errors.New("claude exited with background work outstanding")
+		case !progressed:
+			// A full window with nothing written, or a read error that made no
+			// progress (e.g. the session file became permanently unreadable):
+			// either way another attempt would only spin.
+			if err == nil || errors.Is(err, context.DeadlineExceeded) {
+				return offset, fmt.Errorf("no session activity for %s", deferredStallWindow)
+			}
+			return offset, err
+		}
+	}
+}
+
 // awaitSynthesis runs Phase 2b: after background work has drained, tail for the
 // follow-up turn in which claude composes its real final message. It returns
 // the byte offset reached. It stops when that turn produces a turn_duration
 // (setting turnDone via visit), or after synthesisQuietWindow elapses with no
 // new bytes written — the signal that no follow-up turn is coming. Any new
 // bytes reset the quiet window, so a long synthesis turn is captured in full,
-// bounded by the shared deferDeadline (Phase 2's overall budget).
-func (s *runState) awaitSynthesis(ctx context.Context, deferDeadline time.Time, path string, offset int64, childDead func() bool) int64 {
+// bounded only by the job deadline on ctx.
+func (s *runState) awaitSynthesis(ctx context.Context, path string, offset int64, childDead func() bool) int64 {
 	s.awaitingSynthesis = true
 	s.turnDone = false
-	overallCtx, cancelOverall := context.WithDeadline(ctx, deferDeadline)
-	defer cancelOverall()
 	for {
-		quietCtx, cancelQuiet := context.WithTimeout(overallCtx, synthesisQuietWindow)
+		quietCtx, cancelQuiet := context.WithTimeout(ctx, synthesisQuietWindow)
 		newOffset, _ := tailSession(quietCtx, path, offset, childDead, s.visit)
 		cancelQuiet()
 		progressed := newOffset > offset
 		offset = newOffset
-		// Synthesis turn completed, overall budget/job context expired, or a
-		// full quiet window passed with no new bytes — in every case, stop.
-		if s.turnDone || overallCtx.Err() != nil || !progressed {
+		// Synthesis turn completed, job context expired, or a full quiet window
+		// passed with no new bytes — in every case, stop.
+		if s.turnDone || ctx.Err() != nil || !progressed {
 			return offset
 		}
 	}
