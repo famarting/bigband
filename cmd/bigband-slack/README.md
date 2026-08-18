@@ -34,12 +34,19 @@ Edit the config to match your workspace. At minimum you need:
 
 ### Slack app scopes
 
+A one-way mirror rule — `allow_replies: false` and no trigger channel — needs
+exactly one bot scope: `chat:write`. Everything else below belongs to the
+inbound path (mentions, thread replies, triggers). Grant what you use.
+
 Bot scopes:
-- `chat:write` — post messages
+- `chat:write` — post messages, and post acks into threads
+- `reactions:write` — the 👀 / ✅ acks on messages that trigger a run
+  (`router.go`'s `react`). Inbound path only. A missing scope here is logged as
+  `react failed` and swallowed, so the symptom is a silent ack, not a failure.
 - `app_mentions:read` — receive `@app` mentions
 - `channels:history`, `channels:read` — read public channels
 - `groups:history`, `groups:read` — read private channels (only if you use any)
-- `users:read` — resolve user names
+- `users:read` — listed for completeness; no code path calls the users API today
 
 Event subscriptions:
 - `app_mention`
