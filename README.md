@@ -58,6 +58,7 @@ bigband install
 
 # List configured jobs and schedules
 bigband list
+bigband list --sort next   # ordered by whichever job fires soonest
 
 # Show recent execution history
 bigband status
@@ -225,7 +226,7 @@ bigband validate
 
 | Command | Description |
 |---|---|
-| `bigband list` | List configured jobs with schedule, enabled flag, and next run |
+| `bigband list [--all] [--json] [--sort name\|next]` | List configured jobs with schedule, enabled flag, and next run. `--sort next` orders them by soonest next run instead of by name |
 | `bigband status [-n N] [-r]` | Show recent execution history (`-r` filters to active/orphaned runs) |
 | `bigband get <name>` | Show full config and state for a single job |
 | `bigband add [--from <name>]` | Add a job via interactive wizard, optionally seeded from an existing job or template |
