@@ -100,6 +100,90 @@ func TestRunState_BackgroundAgentTracked(t *testing.T) {
 	}
 }
 
+func TestRunState_ArmedMonitorTracked(t *testing.T) {
+	// Regression for the fix-prod-tests run of 2026-08-19: the job armed a
+	// Monitor on a CI proof run, said "I'll hold here until the proof run
+	// reports", and the provider then treated turn_duration as a hard
+	// completion — Monitor was neither a background Bash nor an async Agent,
+	// so pendingBG stayed empty, Phase 2 never engaged, and the holding
+	// sentence was posted to Slack as the run's final answer.
+	s := newRunState(io.Discard, io.Discard)
+
+	// The Monitor tool_use input carries no async marker of its own.
+	arm := parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_mon","name":"Monitor","input":{"command":"gh run watch","description":"proof run","timeout_ms":3600000,"persistent":false}}
+    ]}}`)
+	s.visit(arm)
+	if _, ok := s.pendingBG["toolu_mon"]; ok {
+		t.Errorf("monitor input alone must not be tracked: %+v", s.pendingBG)
+	}
+
+	// The armed acknowledgement in the tool_result is the signal.
+	started := parseRec(t, `{"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_mon","content":"Monitor started (task b138ll10i, timeout 3600000ms). You will be notified on each event. Keep working — do not poll or sleep."}
+    ]}}`)
+	s.visit(started)
+	if _, ok := s.pendingBG["toolu_mon"]; !ok {
+		t.Fatalf("pendingBG missing toolu_mon after monitor ack: %+v", s.pendingBG)
+	}
+
+	// Phase 1 turn_duration still stops the tail (Run then enters Phase 2
+	// because pendingBG is non-empty) — the entry must survive it.
+	td := parseRec(t, `{"type":"system","subtype":"turn_duration","durationMs":820000}`)
+	if !s.visit(td) {
+		t.Fatalf("phase 1 turn_duration must return true")
+	}
+	if len(s.pendingBG) != 1 {
+		t.Fatalf("armed monitor must still be pending at turn_duration: %+v", s.pendingBG)
+	}
+
+	// Intermediate Monitor events carry no tool-use-id and must not drain the
+	// entry — the monitor is still watching.
+	event := parseRec(t, `{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>b138ll10i</task-id>\n<summary>Monitor event</summary>\n<event>build: pass</event>\n</task-notification>"}}`)
+	s.visit(event)
+	if _, ok := s.pendingBG["toolu_mon"]; !ok {
+		t.Errorf("a Monitor event notification must not drain the pending entry: %+v", s.pendingBG)
+	}
+
+	// Only the terminal notification, which carries the tool-use-id, drains.
+	done := parseRec(t, `{"type":"attachment","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification>\n<task-id>b138ll10i</task-id>\n<tool-use-id>toolu_mon</tool-use-id>\n<status>completed</status>\n</task-notification>"}}`)
+	s.visit(done)
+	if len(s.pendingBG) != 0 {
+		t.Errorf("terminal monitor notification should drain pendingBG: %+v", s.pendingBG)
+	}
+}
+
+func TestRunState_BackgroundSendMessageTracked(t *testing.T) {
+	s := newRunState(io.Discard, io.Discard)
+	send := parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_sm","name":"SendMessage","input":{"to":"a977ba66312919436","summary":"follow-up","message":"more work"}}
+    ]}}`)
+	s.visit(send)
+
+	// A resumed agent reports back via task-notification, exactly like an
+	// async Agent dispatch.
+	ack := parseRec(t, `{"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_sm","content":"{\"success\":true,\"message\":\"Agent had no active task; resumed from transcript in the background with your message. You'll be notified when it finishes.\"}"}
+    ]}}`)
+	s.visit(ack)
+	if _, ok := s.pendingBG["toolu_sm"]; !ok {
+		t.Fatalf("backgrounded SendMessage not tracked: %+v", s.pendingBG)
+	}
+
+	// A synchronous SendMessage (delivered to a live agent, no background
+	// resume) must not hold the session open.
+	s2 := newRunState(io.Discard, io.Discard)
+	s2.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_sm2","name":"SendMessage","input":{"to":"a1","summary":"s","message":"m"}}
+    ]}}`))
+	s2.visit(parseRec(t, `{"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_sm2","content":"{\"success\":true,\"message\":\"Message delivered to agent a1.\"}"}
+    ]}}`))
+	if _, ok := s2.pendingBG["toolu_sm2"]; ok {
+		t.Errorf("synchronous SendMessage should not be tracked: %+v", s2.pendingBG)
+	}
+}
+
 func TestRunState_SecondRoundBackgroundAgentReDeferred(t *testing.T) {
 	// Regression: a synthesis turn (Phase 2b) that itself dispatches a new
 	// async agent must repopulate pendingBG so Run's Phase 2 loop re-enters

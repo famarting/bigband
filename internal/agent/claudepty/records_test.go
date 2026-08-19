@@ -2,6 +2,7 @@ package claudepty
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -224,5 +225,52 @@ func TestAssistantToolUses(t *testing.T) {
 	user := &sessionRecord{Type: "user", Message: rec.Message}
 	if got := assistantToolUses(user); got != nil {
 		t.Errorf("user record should yield nil, got %+v", got)
+	}
+}
+
+func TestIsAsyncLaunchResult(t *testing.T) {
+	// Verbatim acknowledgements from real session transcripts.
+	const (
+		monitorAck     = "Monitor started (task b138ll10i, timeout 3600000ms). You will be notified on each event. Keep working — do not poll or sleep. Events may arrive while you are waiting for the user — an event is not their reply."
+		sendMessageAck = `{"success":true,"message":"Agent \"a0faeab183be5d8e5\" had no active task; resumed from transcript in the background with your message. You'll be notified when it finishes. Output: /private/tmp/x/tasks/a0faeab183be5d8e5.output","resumedAgentId":"a0faeab183be5d8e5"}`
+		agentAck       = "Async agent launched successfully. (This tool result is internal metadata — never quote it.)\nagentId: a08c63b3717812215\nThe agent is working in the background. You will be notified automatically when it completes."
+		bashAck        = "Command running in background with ID: b27ax1yy8. Output is being written to: /tmp/b27ax1yy8.output. You will be notified when it completes. To check interim output, use Read on that file path."
+	)
+	tests := []struct {
+		name   string
+		tool   string
+		result string
+		want   bool
+	}{
+		// The regression this function exists for: an armed Monitor is the
+		// only signal that a CI-watching job is still waiting on something.
+		{"monitor armed", "Monitor", monitorAck, true},
+		{"sendmessage backgrounded", "SendMessage", sendMessageAck, true},
+		{"async agent", "Agent", agentAck, true},
+		// A hypothetical future async tool is picked up on the shared promise
+		// without needing to be named here.
+		{"unknown async tool", "Workflow", "Workflow started (run wf_abc123). You will be notified when it completes.", true},
+
+		// Bash is exempt: its signal is run_in_background on the tool_use.
+		{"background bash exempt", "Bash", bashAck, false},
+		// Content that merely quotes the promise is not a dispatch.
+		{"skill doc quoting promise", "Skill", "Launching skill: monitor-help\nMonitor runs in the background and you will be notified on each event.", false},
+		{"read of doc quoting promise", "Read", "1\t// You will be notified when it completes.", false},
+		{"mcp payload quoting promise", "mcp__claude_ai_Notion__notion-fetch", `{"text":"You will be notified when the run completes"}`, false},
+		{"sync agent prose", "Agent", "Here are the results. The job will be notified downstream.", false},
+		{"oversized payload", "Monitor", strings.Repeat("x", asyncPromiseMaxLen) + " You will be notified on each event.", false},
+		{"unrelated result", "Monitor", "Monitor stopped.", false},
+		{"empty result", "Monitor", "", false},
+		// No tool_use seen for this id: fall back to the exact Agent marker
+		// rather than the loose promise.
+		{"unknown tool name with agent marker", "", agentAck, true},
+		{"unknown tool name with promise only", "", monitorAck, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAsyncLaunchResult(tt.tool, tt.result); got != tt.want {
+				t.Errorf("isAsyncLaunchResult(%q, %.40q…) = %v, want %v", tt.tool, tt.result, got, tt.want)
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package claudepty
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
@@ -220,6 +221,53 @@ func toolResultText(b *contentBlock) string {
 // the subagent's actual output here, which won't contain this marker.
 const asyncAgentMarker = "Async agent launched successfully"
 
+// asyncLaunchPromise matches the acknowledgement every async-dispatching tool
+// returns: the work outlives the tool_result and reports back later as a
+// task-notification, so the ack promises one. The wording is uniform across
+// tools even though the rest of the ack is not:
+//
+//	Bash (run_in_background)  "You will be notified when it completes."
+//	Agent (async subagent)    "You will be notified automatically when it completes."
+//	Monitor                   "You will be notified on each event."
+//	SendMessage (bg resume)   "You'll be notified when it finishes."
+//
+// Keying on the shared promise rather than a per-tool marker is deliberate:
+// the first version of this file recognised only Bash and Agent, so when a job
+// armed a Monitor to watch a CI run the pending set stayed empty, Phase 2 never
+// engaged, and the run was cut off at turn_duration with a "holding until the
+// run reports" message as its final answer. Any future tool that dispatches
+// background work the same way is now picked up without a change here.
+var asyncLaunchPromise = regexp.MustCompile(`You(?:'|\x{2019})?(?:ll)?\s+(?:will\s+)?be notified`)
+
+// asyncPromiseExemptTools are tools whose tool_result is content the model
+// asked for — file bodies, command output, web pages, skill instructions,
+// another agent's prose — rather than a status line written by the harness. A
+// notification promise quoted inside such content is not a dispatch, so these
+// are excluded from the asyncLaunchPromise check. Bash is exempt because its
+// real signal is run_in_background in the tool_use input; Agent because its
+// async dispatch has an exact marker (asyncAgentMarker) while a synchronous
+// call returns arbitrary subagent prose here.
+var asyncPromiseExemptTools = map[string]struct{}{
+	"Agent":        {},
+	"Bash":         {},
+	"Edit":         {},
+	"Glob":         {},
+	"Grep":         {},
+	"NotebookEdit": {},
+	"Read":         {},
+	"Skill":        {},
+	"TaskOutput":   {},
+	"WebFetch":     {},
+	"WebSearch":    {},
+	"Write":        {},
+}
+
+// asyncPromiseMaxLen caps how long a result may be and still count as a
+// dispatch ack. Real acks are a short status paragraph (the longest observed,
+// Agent's, is ~1.1KB); anything larger is payload that merely mentions being
+// notified. A second belt behind asyncPromiseExemptTools.
+const asyncPromiseMaxLen = 2000
+
 // isAsyncAgentLaunch reports whether a tool_result text is the Agent tool's
 // async-dispatch acknowledgement. When true, the corresponding tool_use is a
 // background task that will drain via a later task-notification.
@@ -227,10 +275,42 @@ const asyncAgentMarker = "Async agent launched successfully"
 // This is a substring match against model-adjacent text, so a false positive
 // is theoretically possible (e.g. a synchronous subagent whose own output
 // quotes this exact phrase). The blast radius is bounded: the worst case is
-// Phase 2a waiting out deferredMaxWait for a notification that never arrives,
+// Phase 2a waiting out its stall window for a notification that never arrives,
 // never a wrong FinalMessage — so a cheap contains-check is the right tradeoff.
 func isAsyncAgentLaunch(resultText string) bool {
 	return strings.Contains(resultText, asyncAgentMarker)
+}
+
+// isAsyncLaunchResult reports whether the tool_result of toolName announces
+// background work that will report later via a task-notification, and should
+// therefore hold the session open in Phase 2.
+//
+// The error direction is chosen deliberately. A false negative ends the run
+// while the work it was waiting on is still outstanding and posts the wrong
+// final message — the Monitor bug. A false positive only makes Phase 2a wait
+// out one stall window for a notification that never comes, then fall back to
+// the last completed turn; the final message is unaffected. So the check errs
+// toward tracking.
+func isAsyncLaunchResult(toolName, resultText string) bool {
+	if resultText == "" {
+		return false
+	}
+	if toolName == "Agent" || toolName == "" {
+		// Unknown tool name (no matching tool_use seen) gets the Agent
+		// treatment: the exact marker only, never the loose promise.
+		return isAsyncAgentLaunch(resultText)
+	}
+	if _, exempt := asyncPromiseExemptTools[toolName]; exempt {
+		return false
+	}
+	// MCP tools return service payloads, which are arbitrary content.
+	if strings.HasPrefix(toolName, "mcp__") {
+		return false
+	}
+	if len(resultText) > asyncPromiseMaxLen {
+		return false
+	}
+	return asyncLaunchPromise.MatchString(resultText)
 }
 
 // isBackgroundToolInput reports whether a tool_use input requests

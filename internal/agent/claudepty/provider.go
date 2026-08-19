@@ -11,10 +11,11 @@
 //     from its size at spawn time.
 //  3. Surface assistant text blocks live as they appear, and treat
 //     system/turn_duration as a SOFT completion: if Claude scheduled deferred
-//     work in that same turn (Bash or Agent with run_in_background:true, or
-//     ScheduleWakeup), keep tailing past turn_duration so the bg processes —
-//     which die with claude — get a chance to actually run. This happens in
-//     two sub-phases: Phase 2a waits for the background work to drain, then
+//     work in that same turn (a background Bash, an async Agent, an armed
+//     Monitor, a backgrounded SendMessage, or a ScheduleWakeup), keep tailing
+//     past turn_duration so the bg processes — which die with claude — get a
+//     chance to actually run. This happens in two sub-phases: Phase 2a waits
+//     for the background work to drain, then
 //     Phase 2b waits for the follow-up "synthesis" turn the completion
 //     notifications trigger — the turn in which claude reads the results and
 //     composes its real final message. Capturing that turn (not the pre-drain
@@ -247,6 +248,12 @@ type runState struct {
 	wakeup       *wakeupRequest
 	lastSeenText string
 	turnDone     bool
+	// toolNames maps a tool_use id to the tool that issued it, so the
+	// tool_result loop can tell an async-dispatch acknowledgement from
+	// ordinary content (see isAsyncLaunchResult). Entries are dropped as
+	// their results arrive, so this only ever holds the calls still in
+	// flight.
+	toolNames map[string]string
 	// deferring is set once Phase 2 starts. In that mode a turn_duration no
 	// longer ends the tail on its own: Phase 2a keeps tailing until pendingBG
 	// drains to zero, and Phase 2b (awaitingSynthesis) keeps tailing until the
@@ -283,6 +290,7 @@ func newRunState(log, live io.Writer) *runState {
 		log:       log,
 		live:      live,
 		pendingBG: map[string]struct{}{},
+		toolNames: map[string]string{},
 	}
 }
 
@@ -298,6 +306,9 @@ func (s *runState) visit(rec *sessionRecord) bool {
 		emitAssistantText(s.log, s.live, text)
 	}
 	for _, b := range assistantToolUses(rec) {
+		if b.ID != "" {
+			s.toolNames[b.ID] = b.Name
+		}
 		switch b.Name {
 		case "ScheduleWakeup":
 			if w := parseWakeup(b.Input); w != nil {
@@ -306,9 +317,10 @@ func (s *runState) visit(rec *sessionRecord) bool {
 		case "Bash":
 			// Background bash (run_in_background:true) returns immediately and
 			// reports completion later as a task-notification attachment
-			// (drained by bgCompletionToolUseID below). Background Agent
-			// dispatches look synchronous in the input and are detected from
-			// their tool_result instead — see the toolResults loop below.
+			// (drained by bgCompletionToolUseID below). Every other async
+			// dispatcher — Agent, Monitor, SendMessage — looks synchronous in
+			// the input and is detected from its tool_result instead; see the
+			// toolResults loop below.
 			if b.ID != "" && isBackgroundToolInput(b.Input) {
 				s.pendingBG[b.ID] = struct{}{}
 			}
@@ -322,14 +334,16 @@ func (s *runState) visit(rec *sessionRecord) bool {
 		emitToolUse(s.log, s.live, b)
 	}
 	for _, r := range toolResults(rec) {
-		// A background (async) Agent dispatch is only detectable here: its
-		// tool_use input is indistinguishable from a synchronous call, but the
-		// result acknowledges an async launch. Track it so Phase 2 waits for
-		// the subagent's eventual task-notification rather than exiting on the
-		// pre-result turn.
-		if r.ToolUseID != "" && isAsyncAgentLaunch(toolResultText(&r)) {
+		// Most async dispatches are only detectable here: the tool_use input is
+		// indistinguishable from a synchronous call, but the result
+		// acknowledges work that will report back via a task-notification
+		// (an async Agent, an armed Monitor, a backgrounded SendMessage).
+		// Track it so Phase 2 waits for that notification rather than exiting
+		// on the pre-result turn.
+		if r.ToolUseID != "" && isAsyncLaunchResult(s.toolNames[r.ToolUseID], toolResultText(&r)) {
 			s.pendingBG[r.ToolUseID] = struct{}{}
 		}
+		delete(s.toolNames, r.ToolUseID)
 		emitToolResult(s.log, s.live, r)
 	}
 	if u := assistantUsage(rec); u != nil {
