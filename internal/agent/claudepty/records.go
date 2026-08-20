@@ -70,10 +70,14 @@ type attachmentPayload struct {
 
 // wakeupRequest holds the parameters Claude passed to ScheduleWakeup, as
 // they appear on the wire. The provider converts this into agent.WakeupRequest
-// (with time.Duration) for the runner.
+// (with time.Duration) for the runner. Stop is the cancellation form of the
+// call ({"stop":true}, no delay): it ends the dynamic loop, which means any
+// schedule captured earlier in the run must be discarded rather than handed
+// to the runner.
 type wakeupRequest struct {
 	DelaySeconds int    `json:"delaySeconds"`
 	Prompt       string `json:"prompt"`
+	Stop         bool   `json:"stop"`
 }
 
 // isTurnTerminal reports whether r marks the end of one Claude turn. Claude
@@ -329,8 +333,11 @@ func isBackgroundToolInput(input json.RawMessage) bool {
 	return in.RunInBackground
 }
 
-// parseWakeup extracts a wakeupRequest from a ScheduleWakeup tool_use input,
-// or returns nil if the input is empty / malformed / has no positive delay.
+// parseWakeup extracts a wakeupRequest from a ScheduleWakeup tool_use input.
+// It returns nil unless the input is one of the two shapes the provider acts
+// on: a schedule (positive delaySeconds) or a cancellation (stop:true, where
+// every other field is ignored — see the Stop field). Empty or malformed
+// input, and a schedule with no positive delay, all yield nil.
 func parseWakeup(input json.RawMessage) *wakeupRequest {
 	if len(input) == 0 {
 		return nil
@@ -339,10 +346,61 @@ func parseWakeup(input json.RawMessage) *wakeupRequest {
 	if err := json.Unmarshal(input, &req); err != nil {
 		return nil
 	}
+	if req.Stop {
+		return &req
+	}
 	if req.DelaySeconds <= 0 {
 		return nil
 	}
 	return &req
+}
+
+// parseStopTaskID extracts the task id from a TaskStop tool_use input, or ""
+// if the input is empty / malformed / carries no id.
+func parseStopTaskID(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var in struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(input, &in); err != nil {
+		return ""
+	}
+	return in.TaskID
+}
+
+// backgroundTaskIDPatterns extract the harness-side task id out of an
+// async-dispatch acknowledgement. That id is the handle TaskStop takes, while
+// the pending-bg set is keyed by tool_use id, so mapping one to the other is
+// what lets a cancelled task be dropped from the set (see cancelledTaskID).
+// The observed ack shapes, one pattern each:
+//
+//	Bash (run_in_background)  "Command running in background with ID: bve3b3lqo."
+//	Monitor                   "Monitor started (task b46h39aov, timeout 2400000ms)."
+//	Agent (async subagent)    "agentId: a08c63b3717812215"
+//
+// A dispatcher whose ack carries an id in some other shape simply isn't
+// mapped, which costs nothing beyond the pre-existing behaviour: its
+// cancellation goes unnoticed and Phase 2a waits out one stall window.
+var backgroundTaskIDPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`background with ID:\s*([A-Za-z0-9_-]+)`),
+	regexp.MustCompile(`\(task\s+([A-Za-z0-9_-]+)[,)]`),
+	regexp.MustCompile(`agentId:\s*([A-Za-z0-9_-]+)`),
+}
+
+// backgroundTaskID returns the task id announced by an async-dispatch
+// acknowledgement, or "" if the text carries none.
+func backgroundTaskID(resultText string) string {
+	if resultText == "" {
+		return ""
+	}
+	for _, re := range backgroundTaskIDPatterns {
+		if m := re.FindStringSubmatch(resultText); m != nil {
+			return m[1]
+		}
+	}
+	return ""
 }
 
 // bgCompletionToolUseID extracts the tool-use id from a task-notification

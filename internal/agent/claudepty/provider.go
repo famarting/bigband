@@ -254,6 +254,15 @@ type runState struct {
 	// their results arrive, so this only ever holds the calls still in
 	// flight.
 	toolNames map[string]string
+	// bgTaskIDs maps a background task id (the handle TaskStop takes) to the
+	// tool_use id its dispatch is tracked under in pendingBG. It is populated
+	// from the dispatch acknowledgement, which is the only place the two ids
+	// appear together.
+	bgTaskIDs map[string]string
+	// stopRequests maps a TaskStop tool_use id to the task id it asked to
+	// cancel, so the result can be matched back to the request. Entries are
+	// dropped as their results arrive.
+	stopRequests map[string]string
 	// deferring is set once Phase 2 starts. In that mode a turn_duration no
 	// longer ends the tail on its own: Phase 2a keeps tailing until pendingBG
 	// drains to zero, and Phase 2b (awaitingSynthesis) keeps tailing until the
@@ -287,10 +296,12 @@ type runState struct {
 
 func newRunState(log, live io.Writer) *runState {
 	return &runState{
-		log:       log,
-		live:      live,
-		pendingBG: map[string]struct{}{},
-		toolNames: map[string]string{},
+		log:          log,
+		live:         live,
+		pendingBG:    map[string]struct{}{},
+		toolNames:    map[string]string{},
+		bgTaskIDs:    map[string]string{},
+		stopRequests: map[string]string{},
 	}
 }
 
@@ -312,7 +323,22 @@ func (s *runState) visit(rec *sessionRecord) bool {
 		switch b.Name {
 		case "ScheduleWakeup":
 			if w := parseWakeup(b.Input); w != nil {
-				s.wakeup = w
+				// stop:true ends the dynamic loop. Any schedule captured
+				// earlier in the run must not outlive it, or the runner would
+				// resume the job on a wakeup claude explicitly cancelled.
+				if w.Stop {
+					s.wakeup = nil
+				} else {
+					s.wakeup = w
+				}
+			}
+		case "TaskStop":
+			// Remember which task this asked to cancel; the result (below)
+			// says whether it worked.
+			if b.ID != "" {
+				if taskID := parseStopTaskID(b.Input); taskID != "" {
+					s.stopRequests[b.ID] = taskID
+				}
 			}
 		case "Bash":
 			// Background bash (run_in_background:true) returns immediately and
@@ -340,8 +366,31 @@ func (s *runState) visit(rec *sessionRecord) bool {
 		// (an async Agent, an armed Monitor, a backgrounded SendMessage).
 		// Track it so Phase 2 waits for that notification rather than exiting
 		// on the pre-result turn.
-		if r.ToolUseID != "" && isAsyncLaunchResult(s.toolNames[r.ToolUseID], toolResultText(&r)) {
+		resultText := toolResultText(&r)
+		if r.ToolUseID != "" && isAsyncLaunchResult(s.toolNames[r.ToolUseID], resultText) {
 			s.pendingBG[r.ToolUseID] = struct{}{}
+		}
+		// A cancelled task never sends a task-notification, so pendingBG can
+		// only lose the entry if we can name the task. Record the id off every
+		// dispatch we are actually waiting on — including a background Bash,
+		// whose entry was added back at tool_use time.
+		if _, waiting := s.pendingBG[r.ToolUseID]; waiting {
+			if taskID := backgroundTaskID(resultText); taskID != "" {
+				s.bgTaskIDs[taskID] = r.ToolUseID
+			}
+		}
+		if taskID, stopping := s.stopRequests[r.ToolUseID]; stopping {
+			delete(s.stopRequests, r.ToolUseID)
+			// Only a successful stop is terminal. A failed one may well mean
+			// the id was wrong and the real task is still running, and
+			// dropping it then would end the run early with the wrong final
+			// message — the expensive direction of this error.
+			if !r.IsError {
+				if useID, mapped := s.bgTaskIDs[taskID]; mapped {
+					delete(s.pendingBG, useID)
+					delete(s.bgTaskIDs, taskID)
+				}
+			}
 		}
 		delete(s.toolNames, r.ToolUseID)
 		emitToolResult(s.log, s.live, r)

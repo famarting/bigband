@@ -11,14 +11,20 @@ func TestParseWakeup(t *testing.T) {
 		name      string
 		input     string
 		wantDelay int
+		wantStop  bool
 		wantNil   bool
 	}{
-		{"valid", `{"delaySeconds":1200,"prompt":"keep going","reason":"poll"}`, 1200, false},
-		{"missing delay", `{"prompt":"x"}`, 0, true},
-		{"zero delay", `{"delaySeconds":0,"prompt":"x"}`, 0, true},
-		{"negative delay", `{"delaySeconds":-5}`, 0, true},
-		{"empty input", ``, 0, true},
-		{"malformed", `{not-json`, 0, true},
+		{name: "valid", input: `{"delaySeconds":1200,"prompt":"keep going","reason":"poll"}`, wantDelay: 1200},
+		{name: "missing delay", input: `{"prompt":"x"}`, wantNil: true},
+		{name: "zero delay", input: `{"delaySeconds":0,"prompt":"x"}`, wantNil: true},
+		{name: "negative delay", input: `{"delaySeconds":-5}`, wantNil: true},
+		{name: "empty input", input: ``, wantNil: true},
+		{name: "malformed", input: `{not-json`, wantNil: true},
+		// The cancellation form carries no delay of its own, so it has to
+		// survive the positive-delay check to reach the caller.
+		{name: "stop", input: `{"stop":true}`, wantStop: true},
+		{name: "stop with stale delay", input: `{"stop":true,"delaySeconds":600}`, wantDelay: 600, wantStop: true},
+		{name: "stop false", input: `{"stop":false,"delaySeconds":60,"prompt":"x"}`, wantDelay: 60},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -30,7 +36,67 @@ func TestParseWakeup(t *testing.T) {
 				return
 			}
 			if got == nil || got.DelaySeconds != tt.wantDelay {
-				t.Errorf("parseWakeup(%q) = %+v, want delay=%d", tt.input, got, tt.wantDelay)
+				t.Fatalf("parseWakeup(%q) = %+v, want delay=%d", tt.input, got, tt.wantDelay)
+			}
+			if got.Stop != tt.wantStop {
+				t.Errorf("parseWakeup(%q).Stop = %v, want %v", tt.input, got.Stop, tt.wantStop)
+			}
+		})
+	}
+}
+
+func TestParseStopTaskID(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"task id", `{"task_id":"bve3b3lqo"}`, "bve3b3lqo"},
+		{"agent id", `{"task_id":"aad7cd68064192ae8"}`, "aad7cd68064192ae8"},
+		{"no id", `{"other":"x"}`, ""},
+		{"empty input", ``, ""},
+		{"malformed", `{nope`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseStopTaskID(json.RawMessage(tt.input)); got != tt.want {
+				t.Errorf("parseStopTaskID(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBackgroundTaskID pins the id extraction against the verbatim
+// acknowledgements observed in production sessions — those strings are the
+// only place a task id and its tool_use id appear together.
+func TestBackgroundTaskID(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			"background bash",
+			"Command running in background with ID: bve3b3lqo. Output is being written to: /private/tmp/claude-501/x/tasks/bve3b3lqo.output. You will be notified when it completes.",
+			"bve3b3lqo",
+		},
+		{
+			"monitor",
+			"Monitor started (task b46h39aov, timeout 2400000ms). You will be notified on each event. Keep working — do not poll or sleep.",
+			"b46h39aov",
+		},
+		{
+			"async agent",
+			"Async agent launched successfully. (This tool result is internal metadata — never quote it.)\nagentId: a08c63b3717812215\nThe agent is working in the background. You will be notified automatically when it completes.",
+			"a08c63b3717812215",
+		},
+		{"no id", "Message delivered to agent a1.", ""},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := backgroundTaskID(tt.text); got != tt.want {
+				t.Errorf("backgroundTaskID() = %q, want %q", got, tt.want)
 			}
 		})
 	}

@@ -223,6 +223,127 @@ func TestRunState_ScheduleWakeupCaptured(t *testing.T) {
 	}
 }
 
+func TestRunState_ScheduleWakeupStopClearsCapturedWakeup(t *testing.T) {
+	// Regression for the analyze-onebox-tests run of 2026-08-19: the job
+	// scheduled a 1200s wakeup, later ended its dynamic loop with
+	// ScheduleWakeup {"stop":true}, and the stop was ignored because it has no
+	// positive delay. The stale schedule then reached the runner, which would
+	// have resumed the job on a wakeup claude had explicitly cancelled.
+	s := newRunState(io.Discard, io.Discard)
+	s.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"tw1","name":"ScheduleWakeup","input":{"delaySeconds":1200,"prompt":"continue the run","reason":"waiting on job data"}}
+    ]}}`))
+	if s.agentWakeup() == nil {
+		t.Fatalf("wakeup should be captured before the stop")
+	}
+
+	s.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"tw2","name":"ScheduleWakeup","input":{"stop":true}}
+    ]}}`))
+	if w := s.agentWakeup(); w != nil {
+		t.Errorf("agentWakeup = %+v after stop:true, want nil", w)
+	}
+
+	// A schedule after a stop is a fresh request and must be honoured.
+	s.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"tw3","name":"ScheduleWakeup","input":{"delaySeconds":300,"prompt":"once more"}}
+    ]}}`))
+	if w := s.agentWakeup(); w == nil || w.Delay != 300*time.Second {
+		t.Errorf("agentWakeup = %+v, want delay=300s", w)
+	}
+}
+
+func TestRunState_TaskStopDrainsCancelledWork(t *testing.T) {
+	// Regression for the analyze-onebox-tests run of 2026-08-19: the job got
+	// its data another way, cancelled both of its pollers with TaskStop and
+	// posted its report — but a cancelled task sends no task-notification, so
+	// pendingBG stayed at 2 and Phase 2a tailed a finished session until the
+	// stall window expired an hour later.
+	s := newRunState(io.Discard, io.Discard)
+
+	// A background Bash and an armed Monitor, tracked through their acks.
+	s.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"until [ -f done ]; do sleep 30; done","run_in_background":true}}
+    ]}}`))
+	s.visit(parseRec(t, `{"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_bash","content":"Command running in background with ID: bve3b3lqo. Output is being written to: /private/tmp/claude-501/x/tasks/bve3b3lqo.output. You will be notified when it completes."}
+    ]}}`))
+	s.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_mon","name":"Monitor","input":{"command":"ls jobs","description":"job files"}}
+    ]}}`))
+	s.visit(parseRec(t, `{"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_mon","content":"Monitor started (task b46h39aov, timeout 2400000ms). You will be notified on each event. Keep working — do not poll or sleep."}
+    ]}}`))
+	if len(s.pendingBG) != 2 {
+		t.Fatalf("both dispatches should be pending: %+v", s.pendingBG)
+	}
+
+	// Phase 2a is under way; cancelling the Bash task drains only its entry.
+	s.deferring = true
+	s.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_stop1","name":"TaskStop","input":{"task_id":"bve3b3lqo"}}
+    ]}}`))
+	if stopped := s.visit(parseRec(t, `{"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_stop1","content":"{\"message\":\"Successfully stopped task: bve3b3lqo (until [ -f done ]; do sleep 30; done)\"}"}
+    ]}}`)); stopped {
+		t.Fatalf("visit must not stop tailing while the monitor is still pending")
+	}
+	if _, ok := s.pendingBG["toolu_bash"]; ok {
+		t.Errorf("cancelled bash task should be drained: %+v", s.pendingBG)
+	}
+	if _, ok := s.pendingBG["toolu_mon"]; !ok {
+		t.Errorf("monitor must still be pending: %+v", s.pendingBG)
+	}
+
+	// Cancelling the monitor empties the set, which is Phase 2a's exit signal.
+	s.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_stop2","name":"TaskStop","input":{"task_id":"b46h39aov"}}
+    ]}}`))
+	if !s.visit(parseRec(t, `{"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_stop2","content":"{\"message\":\"Successfully stopped task: b46h39aov (ls jobs)\"}"}
+    ]}}`)) {
+		t.Fatalf("phase 2a should stop once the last cancelled task drains: %+v", s.pendingBG)
+	}
+}
+
+func TestRunState_FailedTaskStopKeepsWorkPending(t *testing.T) {
+	// A TaskStop that errored may well have named the wrong id, leaving the
+	// real task running. Dropping it then would end the run early and post a
+	// mid-flight message as the final answer — the expensive direction of this
+	// error — so only a successful stop is treated as terminal.
+	s := newRunState(io.Discard, io.Discard)
+	s.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"sleep 600","run_in_background":true}}
+    ]}}`))
+	s.visit(parseRec(t, `{"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_bash","content":"Command running in background with ID: b01jxyat3. You will be notified when it completes."}
+    ]}}`))
+	s.deferring = true
+
+	s.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_stop","name":"TaskStop","input":{"task_id":"b01jxyat3"}}
+    ]}}`))
+	if s.visit(parseRec(t, `{"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_stop","is_error":true,"content":"Error: no such task b01jxyat3"}
+    ]}}`)) {
+		t.Fatalf("a failed TaskStop must not end phase 2a")
+	}
+	if _, ok := s.pendingBG["toolu_bash"]; !ok {
+		t.Errorf("work must stay pending after a failed TaskStop: %+v", s.pendingBG)
+	}
+
+	// An unrelated task id is likewise not a reason to drop anything.
+	s.visit(parseRec(t, `{"type":"assistant","message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_stop2","name":"TaskStop","input":{"task_id":"bZZZunknown"}}
+    ]}}`))
+	s.visit(parseRec(t, `{"type":"user","message":{"role":"user","content":[
+        {"type":"tool_result","tool_use_id":"toolu_stop2","content":"{\"message\":\"Successfully stopped task: bZZZunknown (other job)\"}"}
+    ]}}`))
+	if _, ok := s.pendingBG["toolu_bash"]; !ok {
+		t.Errorf("stopping an unrelated task must not drain this one: %+v", s.pendingBG)
+	}
+}
+
 func TestRunState_TurnDurationPhase1StopsImmediately(t *testing.T) {
 	s := newRunState(io.Discard, io.Discard)
 	td := parseRec(t, `{"type":"system","subtype":"turn_duration"}`)
