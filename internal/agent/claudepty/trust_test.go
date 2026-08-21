@@ -16,6 +16,19 @@ func withFakeHome(t *testing.T) string {
 	return home
 }
 
+// realTempDir returns a temp dir with its symlinks resolved. On macOS
+// t.TempDir() hands back a path under /var, itself a symlink to /private/var,
+// and trust entries are keyed on the physical path claude reports as its cwd —
+// so the expectation has to be the resolved one.
+func realTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	return dir
+}
+
 // readJSON unmarshals path into a generic map for assertions.
 func readJSON(t *testing.T, path string) map[string]any {
 	t.Helper()
@@ -32,7 +45,7 @@ func readJSON(t *testing.T, path string) map[string]any {
 
 func TestEnsureProjectTrusted_CreatesFileWhenMissing(t *testing.T) {
 	home := withFakeHome(t)
-	workDir := t.TempDir()
+	workDir := realTempDir(t)
 
 	if err := ensureProjectTrusted(workDir); err != nil {
 		t.Fatalf("ensureProjectTrusted: %v", err)
@@ -54,7 +67,7 @@ func TestEnsureProjectTrusted_CreatesFileWhenMissing(t *testing.T) {
 
 func TestEnsureProjectTrusted_PreservesOtherKeys(t *testing.T) {
 	home := withFakeHome(t)
-	workDir := t.TempDir()
+	workDir := realTempDir(t)
 	otherDir := "/some/other/dir"
 
 	// Pre-existing config with unrelated top-level + per-project state we must
@@ -101,7 +114,7 @@ func TestEnsureProjectTrusted_PreservesOtherKeys(t *testing.T) {
 
 func TestEnsureProjectTrusted_FastPathNoOpWhenAlreadyTrusted(t *testing.T) {
 	home := withFakeHome(t)
-	workDir := t.TempDir()
+	workDir := realTempDir(t)
 
 	// Seed with trust already true. Then make the file read-only so any
 	// attempted write would fail loudly — proving the fast path skipped I/O.

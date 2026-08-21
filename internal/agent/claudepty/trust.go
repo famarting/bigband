@@ -40,7 +40,7 @@ func claudeGlobalConfigPath() (string, error) {
 // ~/.claude.json via temp file + rename. Unknown keys at every level are
 // preserved.
 func ensureProjectTrusted(workDir string) error {
-	abs, err := filepath.Abs(workDir)
+	abs, err := physicalPath(workDir)
 	if err != nil {
 		return fmt.Errorf("resolve workdir: %w", err)
 	}

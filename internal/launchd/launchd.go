@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/famarting/bigband/internal/paths"
 )
@@ -188,14 +189,60 @@ func (s *Service) Start() error { return launchctl("start", s.Label) }
 // Stop asks launchctl to stop the agent.
 func (s *Service) Stop() error { return launchctl("stop", s.Label) }
 
+// settleTimeout bounds how long we wait for launchd to finish a bootout or a
+// bootstrap. A daemon shutdown has to stop its extension children first, so the
+// teardown outlives the bootout call by roughly a second; ten is slack.
+const settleTimeout = 10 * time.Second
+
+// loaded reports whether launchd currently has a definition for this service.
+// This is the only trustworthy signal that a load worked: `launchctl bootstrap`
+// races a still-running teardown, and the legacy `launchctl load -w` shim exits
+// 0 whether or not it loaded anything, so an unverified "success" is how the
+// daemon ends up silently absent for hours.
+func (s *Service) loaded() bool {
+	uid := strconv.Itoa(os.Getuid())
+	return exec.Command("launchctl", "print", "gui/"+uid+"/"+s.Label).Run() == nil
+}
+
+// waitFor polls want until it holds or settleTimeout elapses, reporting whether
+// it held.
+func waitFor(want func() bool) bool {
+	deadline := time.Now().Add(settleTimeout)
+	for {
+		if want() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func (s *Service) bootstrapLoad() error {
 	uid := strconv.Itoa(os.Getuid())
-	out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid, s.PlistPath()).CombinedOutput()
-	if err != nil {
-		out2, err2 := exec.Command("launchctl", "load", "-w", s.PlistPath()).CombinedOutput()
-		if err2 != nil {
-			return fmt.Errorf("%s; legacy load: %s", out, out2)
+	var last []byte
+	// Retry rather than fire once: bootstrap fails while the previous instance
+	// is still booting out, and that window is exactly the one `bigband
+	// install` runs in when it restarts a running daemon.
+	deadline := time.Now().Add(settleTimeout)
+	for {
+		out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid, s.PlistPath()).CombinedOutput()
+		if err == nil {
+			break
 		}
+		last = out
+		if time.Now().After(deadline) {
+			out2, err2 := exec.Command("launchctl", "load", "-w", s.PlistPath()).CombinedOutput()
+			if err2 != nil {
+				return fmt.Errorf("%s; legacy load: %s", last, out2)
+			}
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !waitFor(s.loaded) {
+		return fmt.Errorf("launchd reports no service %s after loading %s: %s", s.Label, s.PlistPath(), last)
 	}
 	return nil
 }
@@ -208,6 +255,11 @@ func (s *Service) bootstrapUnload() error {
 		if err2 != nil {
 			return fmt.Errorf("%s; legacy unload: %s", out, out2)
 		}
+	}
+	// bootout returns before the service is gone — the daemon still has to stop
+	// its extension children. Loading again while that runs is what fails.
+	if !waitFor(func() bool { return !s.loaded() }) {
+		return fmt.Errorf("service %s still loaded %s after bootout", s.Label, settleTimeout)
 	}
 	return nil
 }
