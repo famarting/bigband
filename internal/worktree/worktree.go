@@ -66,12 +66,37 @@ func DefaultPath(repoRoot, jobName string) string {
 
 // SubDir returns the path inside wtPath that corresponds to jobFolder.
 // If jobFolder is the repo root itself, wtPath is returned unchanged.
+//
+// Both ends are resolved through symlinks first. repoRoot comes from `git
+// rev-parse --show-toplevel`, which is always physical, while jobFolder is
+// whatever string the job was configured with — so a folder reached through a
+// symlink (~/shortcut/repo) produced a relative path climbing out of the repo
+// and back down the other spelling. That path resolves to the original
+// checkout, which exists, so the caller's existence check passed and the job
+// silently ran in the user's own working tree instead of its worktree.
 func SubDir(repoRoot, wtPath, jobFolder string) string {
-	rel, err := filepath.Rel(repoRoot, jobFolder)
+	root := resolved(repoRoot)
+	folder := resolved(jobFolder)
+	rel, err := filepath.Rel(root, folder)
 	if err != nil || rel == "." {
 		return wtPath
 	}
+	// Anything still escaping the repo root is not a subdirectory of it, and
+	// the only sane run dir left is the worktree root — never a path outside
+	// the worktree.
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return wtPath
+	}
 	return filepath.Join(wtPath, rel)
+}
+
+// resolved expands symlinks in path, falling back to path itself when it does
+// not exist yet.
+func resolved(path string) string {
+	if p, err := filepath.EvalSymlinks(path); err == nil {
+		return p
+	}
+	return path
 }
 
 // BranchName returns the git branch name bigband uses for a job worktree.

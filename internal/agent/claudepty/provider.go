@@ -154,6 +154,22 @@ func (provider) Run(ctx context.Context, req agent.Request) (agent.Result, error
 	}
 	defer pty.close()
 
+	// The transcript is created lazily, so it may not exist yet — but if it
+	// never appears the tail below would poll until the job deadline. Wait for
+	// it, accepting it wherever the session id actually landed. Only for fresh
+	// sessions: a resume snapshots startOffset against the derived path, and
+	// tailing a different file from that offset would replay or skip records.
+	if req.ResumeSessionID == "" {
+		found, waitErr := awaitSessionFile(ctx, jsonlPath, sessionID, sessionFileGrace, pty.exited, func(found string) {
+			bannerf(log, live, "claude-pty: transcript at %s, not the derived %s", found, jsonlPath)
+		})
+		if waitErr != nil {
+			bannerf(log, live, "claude-pty: aborted: %v", waitErr)
+			return agent.Result{SessionID: sessionID}, waitErr
+		}
+		jsonlPath = found
+	}
+
 	state := newRunState(log, live)
 
 	// Phase 1: tail until the first turn_duration. Visit returns true on that

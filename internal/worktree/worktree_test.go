@@ -1,6 +1,7 @@
 package worktree
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -75,6 +76,51 @@ func TestSubDir_SubDirectory(t *testing.T) {
 	got := SubDir(repoRoot, wtPath, jobFolder)
 	want := "/repos/myrepo-bb-job/services/api"
 	if got != want {
+		t.Errorf("SubDir = %q, want %q", got, want)
+	}
+}
+
+func TestSubDir_SymlinkedJobFolder(t *testing.T) {
+	// A job configured with a symlinked spelling of the repo root must still
+	// run at the worktree root. Before both ends were resolved, the relative
+	// path climbed out of the worktree and landed back in the original
+	// checkout — which exists, so nothing caught it.
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	repoRoot := filepath.Join(tmp, "src", "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	link := filepath.Join(tmp, "shortcut")
+	if err := os.Symlink(repoRoot, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	wtPath := filepath.Join(tmp, "src", "repo-bb-job")
+
+	if got := SubDir(repoRoot, wtPath, link); got != wtPath {
+		t.Errorf("SubDir with symlinked folder = %q, want %q", got, wtPath)
+	}
+}
+
+func TestSubDir_SymlinkedSubdirectory(t *testing.T) {
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	repoRoot := filepath.Join(tmp, "src", "repo")
+	if err := os.MkdirAll(filepath.Join(repoRoot, "services", "api"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	link := filepath.Join(tmp, "shortcut")
+	if err := os.Symlink(repoRoot, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	wtPath := filepath.Join(tmp, "src", "repo-bb-job")
+
+	want := filepath.Join(wtPath, "services", "api")
+	if got := SubDir(repoRoot, wtPath, filepath.Join(link, "services", "api")); got != want {
 		t.Errorf("SubDir = %q, want %q", got, want)
 	}
 }
