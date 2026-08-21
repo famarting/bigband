@@ -147,13 +147,19 @@ func (s *Service) Install() error {
 	// bootout+bootstrap is the only pair that reloads the definition.
 	if alreadyInstalled {
 		if err := s.bootstrapUnload(); err != nil {
-			// Not fatal: the service may not be loaded at all, which is exactly
-			// the state we are trying to reach.
+			// Not fatal on its own: the service may not be loaded at all, which
+			// is exactly the state we are trying to reach. Still loaded is a
+			// different matter — the bootstrap below would then re-confirm the
+			// old definition and we would report a restart that never happened.
+			if s.loaded() {
+				return fmt.Errorf("could not unload the running %s (%v) and it is still loaded, so %s cannot take effect",
+					s.Label, err, s.PlistPath())
+			}
 			fmt.Printf("NOTE: could not unload the running agent (%v); continuing\n", err)
 		}
 	}
 
-	if err := s.bootstrapLoad(); err != nil {
+	if err := s.bootstrapLoad(binary); err != nil {
 		fmt.Printf("WARNING: could not load agent automatically: %v\n", err)
 		fmt.Printf("Run manually: launchctl bootout gui/%d/%s; launchctl bootstrap gui/%d %s\n",
 			os.Getuid(), s.Label, os.Getuid(), s.PlistPath())
@@ -192,16 +198,53 @@ func (s *Service) Stop() error { return launchctl("stop", s.Label) }
 // settleTimeout bounds how long we wait for launchd to finish a bootout or a
 // bootstrap. A daemon shutdown has to stop its extension children first, so the
 // teardown outlives the bootout call by roughly a second; ten is slack.
-const settleTimeout = 10 * time.Second
+// Currently not user-configurable; a var only so tests can shrink it.
+var settleTimeout = 10 * time.Second
 
-// loaded reports whether launchd currently has a definition for this service.
+// launchctlPrint dumps launchd's in-memory definition for a service. A var so
+// tests can drive the load/unload logic without a real launchd.
+var launchctlPrint = func(serviceTarget string) ([]byte, error) {
+	return exec.Command("launchctl", "print", serviceTarget).CombinedOutput()
+}
+
+// serviceTarget is the launchd address of this service, e.g.
+// gui/501/io.bigband.daemon.
+func (s *Service) serviceTarget() string {
+	return "gui/" + strconv.Itoa(os.Getuid()) + "/" + s.Label
+}
+
+// definition reports whether launchd currently has a definition for this
+// service, and which program that definition runs ("" when the dump carries no
+// program line — callers must read that as unknown, never as a mismatch).
+//
 // This is the only trustworthy signal that a load worked: `launchctl bootstrap`
 // races a still-running teardown, and the legacy `launchctl load -w` shim exits
 // 0 whether or not it loaded anything, so an unverified "success" is how the
 // daemon ends up silently absent for hours.
+func (s *Service) definition() (program string, loaded bool) {
+	out, err := launchctlPrint(s.serviceTarget())
+	if err != nil {
+		return "", false
+	}
+	return parseProgram(out), true
+}
+
+// loaded reports whether launchd has any definition for this service, without
+// regard to which one.
 func (s *Service) loaded() bool {
-	uid := strconv.Itoa(os.Getuid())
-	return exec.Command("launchctl", "print", "gui/"+uid+"/"+s.Label).Run() == nil
+	_, ok := s.definition()
+	return ok
+}
+
+// parseProgram extracts the "program = /path/to/binary" line from launchctl
+// print output. Returns "" when there is none.
+func parseProgram(out []byte) string {
+	for _, line := range strings.Split(string(out), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "program = "); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
 }
 
 // waitFor polls want until it holds or settleTimeout elapses, reporting whether
@@ -219,7 +262,9 @@ func waitFor(want func() bool) bool {
 	}
 }
 
-func (s *Service) bootstrapLoad() error {
+// bootstrapLoad loads the plist and verifies that launchd ended up running
+// wantProgram from it. wantProgram may be "" to skip that half of the check.
+func (s *Service) bootstrapLoad(wantProgram string) error {
 	uid := strconv.Itoa(os.Getuid())
 	var last []byte
 	// Retry rather than fire once: bootstrap fails while the previous instance
@@ -241,10 +286,30 @@ func (s *Service) bootstrapLoad() error {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !waitFor(s.loaded) {
+	// "Something is loaded" is not enough: a bootout that never completed
+	// leaves the *previous* definition in place under the same label and the
+	// same plist path, so it answers yes while the plist we just wrote has had
+	// no effect. Compare the program launchd is actually running.
+	var program string
+	if !waitFor(func() bool {
+		p, ok := s.definition()
+		program = p
+		return ok
+	}) {
 		return fmt.Errorf("launchd reports no service %s after loading %s: %s", s.Label, s.PlistPath(), last)
 	}
-	return nil
+	return s.programMismatch(wantProgram, program)
+}
+
+// programMismatch reports the case where launchd has a definition loaded but it
+// is not the one just written to the plist. Either side being unknown is not a
+// mismatch — the check must never fail an install over a missing program line.
+func (s *Service) programMismatch(want, got string) error {
+	if want == "" || got == "" || want == got {
+		return nil
+	}
+	return fmt.Errorf("launchd still runs %s for %s, not the %s just written to %s — the previous instance never booted out",
+		got, s.Label, want, s.PlistPath())
 }
 
 func (s *Service) bootstrapUnload() error {

@@ -28,7 +28,15 @@ func physicalPath(dir string) (string, error) {
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return abs, nil
+		// Not existing yet is the expected case and stays lexical. Anything
+		// else (a parent we may not traverse, a component that is not a
+		// directory) has to be loud: a silent lexical fallback there is exactly
+		// the wrong path this function exists to stop producing, and for the
+		// trust stamp there is no later fallback to catch it.
+		if errors.Is(err, os.ErrNotExist) {
+			return abs, nil
+		}
+		return "", fmt.Errorf("resolve symlinks in %s: %w", abs, err)
 	}
 	return resolved, nil
 }
@@ -109,6 +117,13 @@ func fileSize(path string) (int64, error) {
 // servers, and still far below the multi-hour deadlines these jobs carry.
 const sessionFileGrace = 5 * time.Minute
 
+// sessionScanInterval throttles the by-session-id search. Stat'ing the derived
+// path is one syscall, but findSessionFile readdirs ~/.claude/projects and
+// lstats every project directory in it — a few hundred on a machine that has
+// been used for a while — so it runs on a human interval rather than the tail's
+// poll interval.
+const sessionScanInterval = time.Second
+
 // findSessionFile looks for sessionID's transcript under any project directory
 // in ~/.claude/projects. claudeProjectDir mirrors an encoding internal to the
 // claude CLI, so it is a guess that can go stale; searching by session id is
@@ -142,15 +157,19 @@ func findSessionFile(sessionID string) (string, bool) {
 // can here.
 func awaitSessionFile(ctx context.Context, want, sessionID string, grace time.Duration, childDead func() bool, notify func(found string)) (string, error) {
 	deadline := time.Now().Add(grace)
+	var nextScan time.Time // zero: scan on the first pass
 	for {
 		if _, err := os.Stat(want); err == nil {
 			return want, nil
 		}
-		if found, ok := findSessionFile(sessionID); ok {
-			if notify != nil {
-				notify(found)
+		if now := time.Now(); !now.Before(nextScan) {
+			nextScan = now.Add(sessionScanInterval)
+			if found, ok := findSessionFile(sessionID); ok {
+				if notify != nil {
+					notify(found)
+				}
+				return found, nil
 			}
-			return found, nil
 		}
 		if childDead != nil && childDead() {
 			return want, nil

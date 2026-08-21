@@ -182,3 +182,22 @@ func TestAwaitSessionFile(t *testing.T) {
 		}
 	})
 }
+
+func TestPhysicalPath_UnresolvableIsAnError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root traverses unreadable directories")
+	}
+	// A parent we cannot traverse is not "does not exist": returning the lexical
+	// path here would hand claudeProjectDir and the trust stamp the very
+	// mis-spelled path this resolution exists to prevent, with nothing left to
+	// catch it.
+	parent := filepath.Join(t.TempDir(), "closed")
+	if err := os.Mkdir(parent, 0o000); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+
+	if got, err := physicalPath(filepath.Join(parent, "repo")); err == nil {
+		t.Errorf("physicalPath = (%q, nil), want an error for an untraversable parent", got)
+	}
+}
