@@ -148,7 +148,7 @@ func (provider) Run(ctx context.Context, req agent.Request) (agent.Result, error
 	// The PTY output is intentionally dropped — it's full of ANSI cursor
 	// motion and TUI redraws that would only clutter the log. All structured
 	// content reaches us via the durable JSONL file instead.
-	pty, err := startPty(ctx, binary, req.WorkDir, args, io.Discard)
+	pty, err := startPty(ctx, binary, req.WorkDir, args, req.Env, io.Discard)
 	if err != nil {
 		return agent.Result{}, err
 	}
@@ -603,7 +603,7 @@ func bannerf(log, live io.Writer, format string, args ...any) {
 	fmt.Fprintf(live, "\x1b[2m%s\x1b[0m\n", line)
 }
 
-func (provider) ResumeInteractive(_ context.Context, sessionID, workDir string) error {
+func (provider) ResumeInteractive(_ context.Context, sessionID, workDir string, env map[string]string) error {
 	var args []string
 	if sessionID != "" {
 		args = []string{"--resume", sessionID}
@@ -617,5 +617,5 @@ func (provider) ResumeInteractive(_ context.Context, sessionID, workDir string) 
 	if err := os.Chdir(workDir); err != nil {
 		return fmt.Errorf("cannot chdir to %s: %w", workDir, err)
 	}
-	return syscall.Exec(bin, append([]string{binary}, args...), os.Environ())
+	return syscall.Exec(bin, append([]string{binary}, args...), agent.MergeEnv(os.Environ(), env))
 }

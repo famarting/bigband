@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"github.com/famarting/bigband/internal/agent"
 	"io"
 	"os"
 	"os/exec"
@@ -44,13 +45,13 @@ func (s *ptySession) exited() bool {
 // output is consumed by a goroutine that copies to drain (set to io.Discard
 // when the caller doesn't want it persisted). The process is killed if ctx
 // fires before close is called.
-func startPty(ctx context.Context, command, workDir string, args []string, drain io.Writer) (*ptySession, error) {
+func startPty(ctx context.Context, command, workDir string, args []string, env map[string]string, drain io.Writer) (*ptySession, error) {
 	if drain == nil {
 		drain = io.Discard
 	}
 	c := exec.Command(command, args...)
 	c.Dir = workDir
-	c.Env = append(os.Environ(), "TERM=xterm-256color")
+	c.Env = agent.MergeEnv(append(os.Environ(), "TERM=xterm-256color"), env)
 	tty, err := pty.StartWithSize(c, &pty.Winsize{Cols: defaultPtyCols, Rows: defaultPtyRows})
 	if err != nil {
 		return nil, fmt.Errorf("start pty: %w", err)

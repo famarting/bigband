@@ -218,6 +218,17 @@ func addJobWizard(seed *config.Job) error {
 	if agentChoice != "" {
 		job["agent"] = agentChoice
 	}
+	// Carried straight through rather than prompted for: a seed's credential
+	// wiring is the part a user least expects to lose, and silently dropping it
+	// produces a job that runs without the key it was meant to have.
+	if seed != nil {
+		if len(seed.EnvFile) > 0 {
+			job["env_file"] = seed.EnvFile
+		}
+		if len(seed.Env) > 0 {
+			job["env"] = seed.Env
+		}
+	}
 	job["worktree"] = useWorktree
 	if seed != nil {
 		if useWorktree && seed.KeepWorktree != nil {

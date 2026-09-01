@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 )
@@ -36,7 +37,7 @@ type Agent interface {
 	// agent session for sessionID in workDir. Implementations typically use
 	// syscall.Exec so the user gets a real TTY. On success this call does
 	// not return; a non-nil error means the exec failed.
-	ResumeInteractive(ctx context.Context, sessionID, workDir string) error
+	ResumeInteractive(ctx context.Context, sessionID, workDir string, env map[string]string) error
 }
 
 // Request describes one invocation of an agent.
@@ -57,6 +58,9 @@ type Request struct {
 	// ExtraFlags is appended to the provider's constructed argv verbatim.
 	// Use sparingly — provider-specific syntax.
 	ExtraFlags []string
+	// Env is added to the agent subprocess's environment, on top of the
+	// daemon's own. Values here win. Nil means inherit unchanged.
+	Env map[string]string
 	// LogWriter receives the raw subprocess stream.
 	LogWriter io.Writer
 	// Live receives a pretty-rendered version of the run.
@@ -111,4 +115,29 @@ func Get(name string) (Agent, error) {
 		return nil, fmt.Errorf("agent: no provider registered as %q", name)
 	}
 	return a, nil
+}
+
+// MergeEnv returns base plus the given overrides as KEY=VALUE pairs. Go's exec
+// honours the last duplicate, so appending is enough to override an inherited
+// value. Keys are sorted, which keeps the result deterministic and comparable
+// in tests — a provider that ranged over the map directly would produce a
+// different order every run.
+//
+// This lives here, next to Request.Env, because every provider needs exactly
+// this transformation; three copies of it existed before.
+func MergeEnv(base []string, extra map[string]string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(base)+len(keys))
+	out = append(out, base...)
+	for _, k := range keys {
+		out = append(out, k+"="+extra[k])
+	}
+	return out
 }

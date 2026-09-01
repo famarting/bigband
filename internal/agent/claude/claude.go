@@ -47,6 +47,11 @@ func (provider) Run(ctx context.Context, req agent.Request) (agent.Result, error
 
 	c := exec.CommandContext(ctx, binary, buildArgs(req)...)
 	c.Dir = req.WorkDir
+	// Nil Env inherits the daemon's environment; only set it when the entry
+	// asks for additions, so the default path stays untouched.
+	if len(req.Env) > 0 {
+		c.Env = agent.MergeEnv(os.Environ(), req.Env)
+	}
 	// Raw NDJSON is discarded once parsed: plain rendering goes to the log,
 	// colorized rendering to live (when live is a TTY).
 	sw := newStreamWriter(io.Discard, log, live, isTerminal(live))
@@ -88,7 +93,7 @@ func buildArgs(req agent.Request) []string {
 	return args
 }
 
-func (provider) ResumeInteractive(_ context.Context, sessionID, workDir string) error {
+func (provider) ResumeInteractive(_ context.Context, sessionID, workDir string, env map[string]string) error {
 	var args []string
 	if sessionID != "" {
 		args = []string{"--resume", sessionID}
@@ -104,7 +109,7 @@ func (provider) ResumeInteractive(_ context.Context, sessionID, workDir string) 
 	if err := os.Chdir(workDir); err != nil {
 		return fmt.Errorf("cannot chdir to %s: %w", workDir, err)
 	}
-	return syscall.Exec(bin, append([]string{binary}, args...), os.Environ())
+	return syscall.Exec(bin, append([]string{binary}, args...), agent.MergeEnv(os.Environ(), env))
 }
 
 // isTerminal returns true when w is an *os.File backed by a character device

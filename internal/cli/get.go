@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/famarting/bigband/internal/config"
@@ -98,6 +99,13 @@ func getJob(name string) error {
 		row("agent", agentDisplay(cfg, j))
 		row("model", inheritedDisplay(j.Model, cfg.Defaults.Model))
 		row("effort", inheritedDisplay(j.Effort, cfg.Defaults.Effort))
+		multirow("env_file", j.EnvFile)
+		// Key names only. The command's output is routinely pasted into
+		// tickets and shared terminals, so printing values would defeat the
+		// point of keeping them out of the config in the first place.
+		if names := envKeyNames(cfg, j); len(names) > 0 {
+			row("env", strings.Join(names, ", ")+" (names only)")
+		}
 		multirow("pre_exec", j.PreExec)
 		multirow("post_exec", j.PostExec)
 		fmt.Printf("\n  prompt:\n")
@@ -185,4 +193,20 @@ func agentDisplay(cfg *config.Config, j *config.Job) string {
 	default:
 		return config.DefaultAgent + " (built-in default)"
 	}
+}
+
+// envKeyNames lists the environment keys an entry resolves, sorted, without
+// their values. Files that cannot be read are skipped rather than reported —
+// `bigband validate` is where a bad env_file is meant to surface.
+func envKeyNames(cfg *config.Config, j *config.Job) []string {
+	env, err := cfg.ResolveEnv(j)
+	if err != nil || len(env) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(env))
+	for k := range env {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }

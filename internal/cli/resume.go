@@ -54,9 +54,17 @@ func resumeJob(ctx context.Context, name string) error {
 	// defaults.agent, then DefaultAgent. Falling back to DefaultAgent on a
 	// config error keeps `resume` usable when the config has drifted.
 	agentName := config.DefaultAgent
+	// A resumed session must get the same environment a scheduled run would,
+	// or it silently loses the entry's credentials — the failure this
+	// mechanism exists to prevent. An unreadable env_file stops the resume
+	// rather than starting an agent that cannot authenticate.
+	var resumeEnv map[string]string
 	if cfg, err := config.Load(paths.Config()); err == nil {
 		if j := cfg.JobByName(name); j != nil {
 			agentName = cfg.EffectiveAgent(j)
+			if resumeEnv, err = cfg.ResolveEnv(j); err != nil {
+				return err
+			}
 		} else if cfg.Defaults.Agent != "" {
 			agentName = cfg.Defaults.Agent
 		}
@@ -74,5 +82,5 @@ func resumeJob(ctx context.Context, name string) error {
 	}
 	// ResumeInteractive replaces the current process; on success it does not
 	// return.
-	return ag.ResumeInteractive(ctx, js.SessionID, runDir)
+	return ag.ResumeInteractive(ctx, js.SessionID, runDir, resumeEnv)
 }
