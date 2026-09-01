@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-	"sort"
 	"syscall"
 	"time"
 
@@ -51,7 +50,7 @@ func (provider) Run(ctx context.Context, req agent.Request) (agent.Result, error
 	// Nil Env inherits the daemon's environment; only set it when the entry
 	// asks for additions, so the default path stays untouched.
 	if len(req.Env) > 0 {
-		c.Env = envWithClaude(os.Environ(), req.Env)
+		c.Env = agent.MergeEnv(os.Environ(), req.Env)
 	}
 	// Raw NDJSON is discarded once parsed: plain rendering goes to the log,
 	// colorized rendering to live (when live is a TTY).
@@ -94,7 +93,7 @@ func buildArgs(req agent.Request) []string {
 	return args
 }
 
-func (provider) ResumeInteractive(_ context.Context, sessionID, workDir string) error {
+func (provider) ResumeInteractive(_ context.Context, sessionID, workDir string, env map[string]string) error {
 	var args []string
 	if sessionID != "" {
 		args = []string{"--resume", sessionID}
@@ -110,7 +109,7 @@ func (provider) ResumeInteractive(_ context.Context, sessionID, workDir string) 
 	if err := os.Chdir(workDir); err != nil {
 		return fmt.Errorf("cannot chdir to %s: %w", workDir, err)
 	}
-	return syscall.Exec(bin, append([]string{binary}, args...), os.Environ())
+	return syscall.Exec(bin, append([]string{binary}, args...), agent.MergeEnv(os.Environ(), env))
 }
 
 // isTerminal returns true when w is an *os.File backed by a character device
@@ -126,25 +125,4 @@ func isTerminal(w io.Writer) bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
-}
-
-// envWith returns base plus the given overrides as KEY=VALUE pairs. Later
-// entries win in Go's exec, so appending is enough to override an inherited
-// value. Keys are sorted so the resulting slice is deterministic, which keeps
-// it comparable in tests.
-func envWithClaude(base []string, extra map[string]string) []string {
-	if len(extra) == 0 {
-		return base
-	}
-	keys := make([]string, 0, len(extra))
-	for k := range extra {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := make([]string, 0, len(base)+len(keys))
-	out = append(out, base...)
-	for _, k := range keys {
-		out = append(out, k+"="+extra[k])
-	}
-	return out
 }

@@ -133,6 +133,8 @@ jobs:
 | `agent` | `defaults.agent` (`claude`) | Coding agent provider for this job |
 | `model` | `defaults.model` | Model name passed to the provider (e.g. `claude-opus-4-7`); overrides global default |
 | `effort` | `defaults.effort` | Thinking effort level (`low`, `medium`, `high`); overrides global default |
+| `env` | `{}` | Environment variables for the agent and `pre_exec`/`post_exec`. Merged over `defaults.env`. Values are literal — nothing is expanded. |
+| `env_file` | `[]` | Files of `KEY=VALUE` lines loaded before `env`. Prefer this for secrets: the config holds a path, not the value. Absolute or `~/` paths, mode 600. |
 | `pre_exec` | `[]` | Shell commands run before the agent |
 | `post_exec` | `[]` | Shell commands run after the agent |
 | `worktree` | `true` | Master switch: when `false`, the agent runs directly in `folder` and `keep_worktree`/`reuse_worktree` are ignored. |
@@ -146,6 +148,8 @@ jobs:
 | `shell` | `/bin/sh` | Shell used to run `pre_exec` / `post_exec` |
 | `timeout` | `45m` | Default per-job max runtime |
 | `retain_logs` | `50` | Log files kept per job |
+| `env` | `{}` | Environment variables applied to every job; a job's own `env` overrides these per key |
+| `env_file` | `[]` | Files of `KEY=VALUE` lines loaded for every job, before `defaults.env` |
 | `jitter` | `15m` | Default jitter window when `~` is in a schedule |
 | `ephemeral_retention` | `168h` | How long IPC-submitted one-off state + logs are kept before auto-prune; configured jobs are never touched. Set to `0s` to disable. |
 | `agent` | `claude` | Default coding agent provider for jobs that don't set one explicitly |
@@ -198,6 +202,56 @@ Validate a schedule without touching the daemon:
 ```sh
 bigband validate
 ```
+
+### Job environment
+
+`env` and `env_file` give a job environment variables its work needs — typically a
+model API key — without putting them in the daemon's environment, where every job
+would inherit them.
+
+```yaml
+defaults:
+  env_file: [~/.config/bigband/shared.env]
+
+jobs:
+  - name: nightly
+    env_file: [~/.config/bigband/openai.env]   # secret lives here
+    env:
+      LOG_LEVEL: debug                         # literal value
+```
+
+Layered lowest to highest, so one job can override a single key without
+restating the rest:
+
+    defaults.env_file  →  defaults.env  →  job.env_file  →  job.env
+
+They reach the agent process, `pre_exec` and `post_exec` alike.
+
+**`env_file` format.** `KEY=VALUE` per line. Blank lines and `#` comments are
+skipped, a leading `export ` is tolerated so the file can also be sourced, and a
+matched pair of surrounding quotes is stripped. Values are taken literally — a
+password containing `$` is safe.
+
+**Values are never expanded.** There is no `${VAR}` substitution in `env`. If you
+want to pass a variable the daemon already holds, put it in an `env_file`. (Note
+this differs from extension manifests, which *do* interpolate `${env:NAME}` —
+see [docs/MANIFESTS.md](docs/MANIFESTS.md).)
+
+**These are load-time errors, not warnings**, because a credential that is
+silently missing or silently wrong is worse than a daemon that refuses to start:
+
+| Rejected | Why |
+|---|---|
+| `env_file` that cannot be read or parsed | the key would just be absent |
+| `env_file` readable by group or others | `chmod 600` it |
+| `env_file` in a group/world-writable directory | another user could swap the file |
+| a relative `env_file` path | resolves against the daemon's working directory, not the config |
+| a value opening with a quote it never closes | the stray quote ends up inside the secret |
+| a key starting with `BIGBAND_` | reserved; `post_exec` relies on those |
+
+Run `bigband validate` after editing either field — a bad path or permission
+fails every restart, not just once. `bigband get <job>` lists the resolved key
+*names* (never values) so you can confirm what a job will receive.
 
 ### Post-exec environment
 
@@ -342,7 +396,7 @@ What this means in practice:
 
 bigband runs commands and the configured coding agent with **your user's permissions**. Specifically:
 
-- `pre_exec` and `post_exec` commands are run as shell commands under the configured `shell`. They inherit your environment.
+- `pre_exec` and `post_exec` commands are run as shell commands under the configured `shell`. They inherit your environment. A job's `env`/`env_file` are layered on top of that inherited environment, so prefer them to exporting a secret into the daemon's own environment where every job sees it. bigband's own `BIGBAND_*` variables are applied last and cannot be overridden by a job.
 - The coding agent runs through its provider with the safe defaults that provider sets. bigband does **not** bypass the agent's built-in permission prompts for you — fully unattended runs are an explicit, provider-specific opt-in, and only safe for jobs whose prompts you fully trust.
 - Each scheduled job runs the prompt as written without further confirmation. Treat the YAML config like code: anyone who can edit it can run arbitrary shell on your machine on your schedule.
 

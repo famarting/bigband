@@ -138,7 +138,16 @@ func Run(ctx context.Context, cfg *config.Config, job *config.Job, st *state.Sta
 	if len(job.PreExec) > 0 {
 		logger.Println("--- pre_exec ---")
 	}
-	preEnv := envPairs(cfg.EffectiveEnv(job))
+	// Resolved once for the whole run: re-reading per step would let a
+	// credential file rotated mid-run hand pre_exec, the agent and post_exec
+	// three different environments. A read failure fails the run rather than
+	// silently dropping the key, which is the whole point of the mechanism.
+	jobEnv, envErr := cfg.ResolveEnv(job)
+	if envErr != nil {
+		logger.Printf("env resolution failed: %v", envErr)
+		status = state.StatusPreFailed
+	}
+	preEnv := envPairs(jobEnv)
 	for _, cmd := range job.PreExec {
 		if err := runShellWithEnv(ctx, cfg, cmd, job.Folder, w, jobTimeout, preEnv); err != nil {
 			logger.Printf("pre_exec failed: %v", err)
@@ -197,7 +206,7 @@ func Run(ctx context.Context, cfg *config.Config, job *config.Job, st *state.Sta
 			Model:      cfg.EffectiveModel(job),
 			Effort:     cfg.EffectiveEffort(job),
 			ExtraFlags: []string{},
-			Env:        cfg.EffectiveEnv(job),
+			Env:        jobEnv,
 			LogWriter:  lf,
 			Live:       out,
 		}
@@ -336,15 +345,18 @@ postExec:
 	if len(job.PostExec) > 0 {
 		logger.Println("--- post_exec ---")
 	}
-	env := []string{
-		"BIGBAND_STATUS=" + string(status),
-		"BIGBAND_LOG=" + logPath,
-		"BIGBAND_JOB=" + job.Name,
-		"BIGBAND_WORKTREE=" + wtPath,
-		"BIGBAND_REPLY_FILE=" + replyPath,
-		"BIGBAND_SESSION_ID=" + sessionID,
-	}
-	env = append(env, envPairs(cfg.EffectiveEnv(job))...)
+	// The entry's env goes first and bigband's own control vars last: exec
+	// honours the last duplicate, so post_exec can always trust BIGBAND_STATUS
+	// even if an entry or a shared defaults.env defines that name. validateEnv
+	// rejects the BIGBAND_ prefix too, so this is belt and braces.
+	env := append(envPairs(jobEnv),
+		"BIGBAND_STATUS="+string(status),
+		"BIGBAND_LOG="+logPath,
+		"BIGBAND_JOB="+job.Name,
+		"BIGBAND_WORKTREE="+wtPath,
+		"BIGBAND_REPLY_FILE="+replyPath,
+		"BIGBAND_SESSION_ID="+sessionID,
+	)
 	for _, cmd := range job.PostExec {
 		if err := runShellWithEnv(ctx, cfg, cmd, runDir, w, jobTimeout, env); err != nil {
 			logger.Printf("post_exec error: %v", err)
@@ -493,10 +505,6 @@ func envPairs(m map[string]string) []string {
 		out = append(out, k+"="+m[k])
 	}
 	return out
-}
-
-func runShell(ctx context.Context, cfg *config.Config, cmd, dir string, w io.Writer, timeout time.Duration) error {
-	return runShellWithEnv(ctx, cfg, cmd, dir, w, timeout, nil)
 }
 
 func runShellWithEnv(ctx context.Context, cfg *config.Config, cmd, dir string, w io.Writer, timeout time.Duration, extra []string) error {

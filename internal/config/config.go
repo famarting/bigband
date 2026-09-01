@@ -278,6 +278,9 @@ func (c *Config) Validate() error {
 	}
 	templateNames := map[string]bool{}
 	for i, t := range c.Templates {
+		if err := validateEnv(fmt.Sprintf("template[%d]", i), t.EnvFile, t.Env); err != nil {
+			return err
+		}
 		if t.Name == "" {
 			return fmt.Errorf("template[%d]: name is required", i)
 		}
@@ -535,149 +538,6 @@ func (c *Config) EffectiveAgent(j *Job) string {
 // EffectiveModel returns the model for a job, falling back to the global
 // default. Empty when neither is set — the agent provider picks its own
 // default in that case.
-// envRef matches ${VAR} and $VAR in an env value.
-var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
-
-// expandEnvRefs resolves ${VAR} / $VAR against the daemon's own environment.
-// This is the other way to keep a secret out of the config: name the variable
-// here and let the value live in the daemon's environment. An unset reference
-// expands to empty, matching shell behaviour — expandEnvRefsStrict reports
-// them instead, and Validate uses that so a typo fails at load.
-func expandEnvRefs(s string) string {
-	return envRef.ReplaceAllStringFunc(s, func(m string) string {
-		name := strings.Trim(m, "${}")
-		return os.Getenv(name)
-	})
-}
-
-// unresolvedEnvRefs returns the names referenced by s that are not set in the
-// daemon's environment.
-func unresolvedEnvRefs(s string) []string {
-	var missing []string
-	for _, m := range envRef.FindAllString(s, -1) {
-		name := strings.Trim(m, "${}")
-		if _, ok := os.LookupEnv(name); !ok {
-			missing = append(missing, name)
-		}
-	}
-	return missing
-}
-
-// expandEnvFilePath resolves a leading ~ so env_file entries can be written
-// the way a person would type them.
-func expandEnvFilePath(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(p, "~"), "/"))
-		}
-	}
-	return p
-}
-
-// loadEnvFile reads KEY=VALUE lines. Blank lines and # comments are skipped, a
-// leading "export " is tolerated so a file can double as something to source,
-// and a single- or double-quoted value is unquoted. Values are NOT ${VAR}
-// expanded: a credential file holds literals, and expanding would mangle a
-// password that happens to contain a dollar sign.
-func loadEnvFile(path string) (map[string]string, error) {
-	data, err := os.ReadFile(expandEnvFilePath(path))
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]string{}
-	for n, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE", path, n+1)
-		}
-		k = strings.TrimSpace(k)
-		if k == "" {
-			return nil, fmt.Errorf("%s:%d: empty key", path, n+1)
-		}
-		v = strings.TrimSpace(v)
-		if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
-			v = v[1 : len(v)-1]
-		}
-		out[k] = v
-	}
-	return out, nil
-}
-
-// EffectiveEnv returns the environment for one entry, layered lowest to
-// highest: defaults.env_file, defaults.env, the entry's env_file, the entry's
-// env. So a shared file can supply the common case and one entry can override
-// a single key without restating the rest. Values may reference ${VAR} from
-// the daemon's environment.
-//
-// Returns nil when nothing is configured, which callers treat as "inherit the
-// daemon's environment unchanged".
-//
-// Unreadable env_file paths are ignored here and reported by Validate, which
-// runs at load; this keeps the signature convenient for call sites on the run
-// path that cannot do anything useful with an error.
-func (c *Config) EffectiveEnv(j *Job) map[string]string {
-	var files []string
-	files = append(files, c.Defaults.EnvFile...)
-	if j != nil {
-		files = append(files, j.EnvFile...)
-	}
-	if len(files) == 0 && len(c.Defaults.Env) == 0 && (j == nil || len(j.Env) == 0) {
-		return nil
-	}
-	out := map[string]string{}
-	for _, f := range c.Defaults.EnvFile {
-		if m, err := loadEnvFile(f); err == nil {
-			for k, v := range m {
-				out[k] = v
-			}
-		}
-	}
-	for k, v := range c.Defaults.Env {
-		out[k] = expandEnvRefs(v)
-	}
-	if j != nil {
-		for _, f := range j.EnvFile {
-			if m, err := loadEnvFile(f); err == nil {
-				for k, v := range m {
-					out[k] = v
-				}
-			}
-		}
-		for k, v := range j.Env {
-			out[k] = expandEnvRefs(v)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// validateEnv checks env_file readability and ${VAR} resolvability for one
-// scope. label appears in the error so the operator knows which entry to fix.
-func validateEnv(label string, files []string, env map[string]string) error {
-	for _, f := range files {
-		if _, err := loadEnvFile(f); err != nil {
-			return fmt.Errorf("%s: env_file %q: %w", label, f, err)
-		}
-		if fi, err := os.Stat(expandEnvFilePath(f)); err == nil && fi.Mode().Perm()&0o077 != 0 {
-			return fmt.Errorf("%s: env_file %q is readable by group or others (mode %04o); chmod 600 it — it is meant to hold the secret the config does not",
-				label, f, fi.Mode().Perm())
-		}
-	}
-	for k, v := range env {
-		if missing := unresolvedEnvRefs(v); len(missing) > 0 {
-			return fmt.Errorf("%s: env %q references %v, which is not set in the daemon's environment", label, k, missing)
-		}
-	}
-	return nil
-}
-
 func (c *Config) EffectiveModel(j *Job) string {
 	if j.Model != "" {
 		return j.Model
@@ -721,5 +581,160 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	d.Duration = dur
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Environment resolution for an entry.
+//
+// Two mechanisms, deliberately only two: literal values in env:, and env_file:
+// for anything secret. An earlier revision also expanded ${VAR} from the
+// daemon's own environment; it was removed because it did the opposite of what
+// this feature is for. It let any config author read any variable the daemon
+// held and hand it to an LLM subprocess with shell access, it silently mangled
+// literal values containing $NAME whenever NAME happened to be set, and its
+// syntax collided with the ${env:NAME} form the manifests already document —
+// so the wrong spelling produced a literal string instead of an error. env_file
+// covers the real need better: the config holds a path, not a value.
+
+// reservedEnvPrefix is bigband's own namespace in a child environment.
+// post_exec relies on BIGBAND_STATUS and friends to decide what to do, so an
+// entry must not be able to set them — a shared defaults.env defining
+// BIGBAND_STATUS would make every job's post_exec believe it succeeded.
+const reservedEnvPrefix = "BIGBAND_"
+
+// expandEnvFilePath resolves a leading ~ so env_file entries can be written the
+// way a person would type them.
+func expandEnvFilePath(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(p, "~"), "/"))
+		}
+	}
+	return p
+}
+
+// loadEnvFile reads KEY=VALUE lines. Blank lines and # comments are skipped, a
+// leading "export " is tolerated so a file can double as something to source,
+// and a matched pair of surrounding quotes is removed.
+//
+// Values are not variable-expanded: a credential file holds literals, and
+// expanding would mangle a password containing a dollar sign.
+func loadEnvFile(path string) (map[string]string, error) {
+	data, err := os.ReadFile(expandEnvFilePath(path))
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for n, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE", path, n+1)
+		}
+		k = strings.TrimSpace(k)
+		if k == "" {
+			return nil, fmt.Errorf("%s:%d: empty key", path, n+1)
+		}
+		v = strings.TrimSpace(v)
+		// An unterminated quote used to be kept as part of the value, which
+		// baked a stray quote into the credential and failed later as an
+		// authentication error rather than here as a config error.
+		if len(v) > 0 && (v[0] == '"' || v[0] == '\'') {
+			q := v[0]
+			if len(v) < 2 || v[len(v)-1] != q {
+				return nil, fmt.Errorf("%s:%d: value for %s opens with %c but does not close with it", path, n+1, k, q)
+			}
+			v = v[1 : len(v)-1]
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// ResolveEnv returns the environment for one entry, layered lowest to highest:
+// defaults.env_file, defaults.env, the entry's env_file, the entry's env. So a
+// shared file can supply the common case and one entry can override a single
+// key without restating the rest.
+//
+// Unlike the EffectiveX helpers this reads files, so it can fail and is not
+// free — hence the different name and the error. Call it once per run and reuse
+// the result: calling it repeatedly would re-read the credential files and
+// could observe different contents mid-run if one is rotated.
+//
+// Returns a nil map when nothing is configured, which callers treat as
+// "inherit the daemon's environment unchanged".
+func (c *Config) ResolveEnv(j *Job) (map[string]string, error) {
+	if len(c.Defaults.EnvFile) == 0 && len(c.Defaults.Env) == 0 &&
+		len(j.EnvFile) == 0 && len(j.Env) == 0 {
+		return nil, nil
+	}
+	out := map[string]string{}
+	layers := []struct {
+		files []string
+		env   map[string]string
+	}{
+		{c.Defaults.EnvFile, c.Defaults.Env},
+		{j.EnvFile, j.Env},
+	}
+	for _, l := range layers {
+		for _, f := range l.files {
+			m, err := loadEnvFile(f)
+			if err != nil {
+				return nil, fmt.Errorf("env_file %q: %w", f, err)
+			}
+			for k, v := range m {
+				out[k] = v
+			}
+		}
+		for k, v := range l.env {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// validateEnv checks one scope's env_file paths and env keys. label appears in
+// the error so the operator knows which entry to fix. Every problem here is an
+// error rather than a warning: a credential that is silently absent or silently
+// wrong is the failure this mechanism exists to prevent.
+func validateEnv(label string, files []string, env map[string]string) error {
+	for _, f := range files {
+		// A relative path would resolve against the daemon's working
+		// directory, which differs between a shell and launchd. Refuse it
+		// rather than read a file the operator did not mean.
+		if !filepath.IsAbs(expandEnvFilePath(f)) {
+			return fmt.Errorf("%s: env_file %q must be an absolute path or start with ~/ — a relative path resolves against the daemon's working directory, not the config file", label, f)
+		}
+		if _, err := loadEnvFile(f); err != nil {
+			return fmt.Errorf("%s: env_file %q: %w", label, f, err)
+		}
+		resolved := expandEnvFilePath(f)
+		if fi, err := os.Stat(resolved); err == nil && fi.Mode().Perm()&0o077 != 0 {
+			return fmt.Errorf("%s: env_file %q is readable by group or others (mode %04o); chmod 600 it — it is meant to hold the secret the config does not",
+				label, f, fi.Mode().Perm())
+		}
+		// A group- or world-writable directory without the sticky bit lets
+		// another local user replace the file with one they own, which would
+		// still pass the mode check above.
+		if di, err := os.Stat(filepath.Dir(resolved)); err == nil {
+			if m := di.Mode(); m.Perm()&0o022 != 0 && m&os.ModeSticky == 0 {
+				return fmt.Errorf("%s: env_file %q sits in a group- or world-writable directory (mode %04o); another user could replace the file, so the mode on the file itself proves nothing",
+					label, f, m.Perm())
+			}
+		}
+	}
+	for k := range env {
+		if strings.HasPrefix(k, reservedEnvPrefix) {
+			return fmt.Errorf("%s: env %q uses the reserved %s prefix; bigband sets those for post_exec and an entry overriding one would corrupt it", label, k, reservedEnvPrefix)
+		}
+	}
 	return nil
 }
