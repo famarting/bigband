@@ -72,6 +72,8 @@ type Defaults struct {
 	PreExec []string `yaml:"pre_exec"`
 	// Env is passed to every entry. An entry's own env: overrides these per key.
 	Env map[string]string `yaml:"env,omitempty"`
+	// EnvFile is loaded for every entry, before defaults.env.
+	EnvFile []string `yaml:"env_file,omitempty"`
 	// EphemeralRetention is how long IPC-submitted one-off job entries
 	// (state + log dirs) are kept after their last run. Zero or unset
 	// disables auto-pruning. Configured jobs (those in jobs:) are never
@@ -112,6 +114,15 @@ type Job struct {
 	// everything else. Merged over defaults.env, so one key can be overridden
 	// without restating the rest.
 	Env map[string]string `yaml:"env,omitempty"`
+
+	// EnvFile lists files of KEY=VALUE lines to load before env:. Prefer this
+	// to env: for credentials — the config then holds a path rather than the
+	// secret, so it can be shared or committed while the value stays in one
+	// narrowly-permissioned file. Later files override earlier ones, and env:
+	// overrides them all. A listed file that cannot be read is a load error,
+	// not a warning: a silently missing credential is the failure mode this
+	// whole mechanism exists to avoid.
+	EnvFile []string `yaml:"env_file,omitempty"`
 
 	// Resolved fields — populated after Validate.
 	cronExpr       string
@@ -262,6 +273,9 @@ func (c *Config) Validate() error {
 	if c.Defaults.Timeout.Duration == 0 {
 		c.Defaults.Timeout = Duration{45 * time.Minute}
 	}
+	if err := validateEnv("defaults", c.Defaults.EnvFile, c.Defaults.Env); err != nil {
+		return err
+	}
 	templateNames := map[string]bool{}
 	for i, t := range c.Templates {
 		if t.Name == "" {
@@ -286,6 +300,9 @@ func (c *Config) Validate() error {
 
 	seen := map[string]bool{}
 	for i, j := range c.Jobs {
+		if err := validateEnv(fmt.Sprintf("job[%d]", i), j.EnvFile, j.Env); err != nil {
+			return err
+		}
 		if j.Name == "" {
 			return fmt.Errorf("job[%d]: name is required", i)
 		}
@@ -518,24 +535,147 @@ func (c *Config) EffectiveAgent(j *Job) string {
 // EffectiveModel returns the model for a job, falling back to the global
 // default. Empty when neither is set — the agent provider picks its own
 // default in that case.
-// EffectiveEnv returns the environment for one entry: defaults.env with the
-// entry's own env: merged over it, so a single key can be overridden without
-// restating the others. Returns nil when neither sets anything, which callers
-// treat as "inherit the daemon's environment unchanged".
-func (c *Config) EffectiveEnv(j *Job) map[string]string {
-	if len(c.Defaults.Env) == 0 && (j == nil || len(j.Env) == 0) {
-		return nil
-	}
-	out := make(map[string]string, len(c.Defaults.Env)+len(j.Env))
-	for k, v := range c.Defaults.Env {
-		out[k] = v
-	}
-	if j != nil {
-		for k, v := range j.Env {
-			out[k] = v
+// envRef matches ${VAR} and $VAR in an env value.
+var envRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+// expandEnvRefs resolves ${VAR} / $VAR against the daemon's own environment.
+// This is the other way to keep a secret out of the config: name the variable
+// here and let the value live in the daemon's environment. An unset reference
+// expands to empty, matching shell behaviour — expandEnvRefsStrict reports
+// them instead, and Validate uses that so a typo fails at load.
+func expandEnvRefs(s string) string {
+	return envRef.ReplaceAllStringFunc(s, func(m string) string {
+		name := strings.Trim(m, "${}")
+		return os.Getenv(name)
+	})
+}
+
+// unresolvedEnvRefs returns the names referenced by s that are not set in the
+// daemon's environment.
+func unresolvedEnvRefs(s string) []string {
+	var missing []string
+	for _, m := range envRef.FindAllString(s, -1) {
+		name := strings.Trim(m, "${}")
+		if _, ok := os.LookupEnv(name); !ok {
+			missing = append(missing, name)
 		}
 	}
+	return missing
+}
+
+// expandEnvFilePath resolves a leading ~ so env_file entries can be written
+// the way a person would type them.
+func expandEnvFilePath(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(p, "~"), "/"))
+		}
+	}
+	return p
+}
+
+// loadEnvFile reads KEY=VALUE lines. Blank lines and # comments are skipped, a
+// leading "export " is tolerated so a file can double as something to source,
+// and a single- or double-quoted value is unquoted. Values are NOT ${VAR}
+// expanded: a credential file holds literals, and expanding would mangle a
+// password that happens to contain a dollar sign.
+func loadEnvFile(path string) (map[string]string, error) {
+	data, err := os.ReadFile(expandEnvFilePath(path))
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for n, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			return nil, fmt.Errorf("%s:%d: expected KEY=VALUE", path, n+1)
+		}
+		k = strings.TrimSpace(k)
+		if k == "" {
+			return nil, fmt.Errorf("%s:%d: empty key", path, n+1)
+		}
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
+			v = v[1 : len(v)-1]
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// EffectiveEnv returns the environment for one entry, layered lowest to
+// highest: defaults.env_file, defaults.env, the entry's env_file, the entry's
+// env. So a shared file can supply the common case and one entry can override
+// a single key without restating the rest. Values may reference ${VAR} from
+// the daemon's environment.
+//
+// Returns nil when nothing is configured, which callers treat as "inherit the
+// daemon's environment unchanged".
+//
+// Unreadable env_file paths are ignored here and reported by Validate, which
+// runs at load; this keeps the signature convenient for call sites on the run
+// path that cannot do anything useful with an error.
+func (c *Config) EffectiveEnv(j *Job) map[string]string {
+	var files []string
+	files = append(files, c.Defaults.EnvFile...)
+	if j != nil {
+		files = append(files, j.EnvFile...)
+	}
+	if len(files) == 0 && len(c.Defaults.Env) == 0 && (j == nil || len(j.Env) == 0) {
+		return nil
+	}
+	out := map[string]string{}
+	for _, f := range c.Defaults.EnvFile {
+		if m, err := loadEnvFile(f); err == nil {
+			for k, v := range m {
+				out[k] = v
+			}
+		}
+	}
+	for k, v := range c.Defaults.Env {
+		out[k] = expandEnvRefs(v)
+	}
+	if j != nil {
+		for _, f := range j.EnvFile {
+			if m, err := loadEnvFile(f); err == nil {
+				for k, v := range m {
+					out[k] = v
+				}
+			}
+		}
+		for k, v := range j.Env {
+			out[k] = expandEnvRefs(v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
+}
+
+// validateEnv checks env_file readability and ${VAR} resolvability for one
+// scope. label appears in the error so the operator knows which entry to fix.
+func validateEnv(label string, files []string, env map[string]string) error {
+	for _, f := range files {
+		if _, err := loadEnvFile(f); err != nil {
+			return fmt.Errorf("%s: env_file %q: %w", label, f, err)
+		}
+		if fi, err := os.Stat(expandEnvFilePath(f)); err == nil && fi.Mode().Perm()&0o077 != 0 {
+			return fmt.Errorf("%s: env_file %q is readable by group or others (mode %04o); chmod 600 it — it is meant to hold the secret the config does not",
+				label, f, fi.Mode().Perm())
+		}
+	}
+	for k, v := range env {
+		if missing := unresolvedEnvRefs(v); len(missing) > 0 {
+			return fmt.Errorf("%s: env %q references %v, which is not set in the daemon's environment", label, k, missing)
+		}
+	}
+	return nil
 }
 
 func (c *Config) EffectiveModel(j *Job) string {
