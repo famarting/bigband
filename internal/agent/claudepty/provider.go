@@ -148,7 +148,7 @@ func (provider) Run(ctx context.Context, req agent.Request) (agent.Result, error
 	// The PTY output is intentionally dropped — it's full of ANSI cursor
 	// motion and TUI redraws that would only clutter the log. All structured
 	// content reaches us via the durable JSONL file instead.
-	pty, err := startPty(ctx, binary, req.WorkDir, args, io.Discard)
+	pty, err := startPty(ctx, binary, req.WorkDir, args, req.Env, io.Discard)
 	if err != nil {
 		return agent.Result{}, err
 	}

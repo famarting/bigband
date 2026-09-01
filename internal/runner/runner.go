@@ -138,8 +138,9 @@ func Run(ctx context.Context, cfg *config.Config, job *config.Job, st *state.Sta
 	if len(job.PreExec) > 0 {
 		logger.Println("--- pre_exec ---")
 	}
+	preEnv := envPairs(cfg.EffectiveEnv(job))
 	for _, cmd := range job.PreExec {
-		if err := runShell(ctx, cfg, cmd, job.Folder, w, jobTimeout); err != nil {
+		if err := runShellWithEnv(ctx, cfg, cmd, job.Folder, w, jobTimeout, preEnv); err != nil {
 			logger.Printf("pre_exec failed: %v", err)
 			status = state.StatusPreFailed
 			pub.Publish(events.Envelope{
@@ -196,6 +197,7 @@ func Run(ctx context.Context, cfg *config.Config, job *config.Job, st *state.Sta
 			Model:      cfg.EffectiveModel(job),
 			Effort:     cfg.EffectiveEffort(job),
 			ExtraFlags: []string{},
+			Env:        cfg.EffectiveEnv(job),
 			LogWriter:  lf,
 			Live:       out,
 		}
@@ -342,6 +344,7 @@ postExec:
 		"BIGBAND_REPLY_FILE=" + replyPath,
 		"BIGBAND_SESSION_ID=" + sessionID,
 	}
+	env = append(env, envPairs(cfg.EffectiveEnv(job))...)
 	for _, cmd := range job.PostExec {
 		if err := runShellWithEnv(ctx, cfg, cmd, runDir, w, jobTimeout, env); err != nil {
 			logger.Printf("post_exec error: %v", err)
@@ -471,6 +474,25 @@ func openLog(jobName, ts string) (string, *os.File, error) {
 		_ = os.Rename(tmp, latest)
 	}
 	return logPath, f, nil
+}
+
+// envPairs flattens a configured environment into KEY=VALUE pairs, sorted so
+// the result is deterministic. Returns nil for an empty map, which the shell
+// helpers treat as "inherit unchanged".
+func envPairs(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k+"="+m[k])
+	}
+	return out
 }
 
 func runShell(ctx context.Context, cfg *config.Config, cmd, dir string, w io.Writer, timeout time.Duration) error {

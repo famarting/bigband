@@ -70,6 +70,8 @@ type Defaults struct {
 	Agent   string   `yaml:"agent,omitempty"`
 	Folder  string   `yaml:"folder"`
 	PreExec []string `yaml:"pre_exec"`
+	// Env is passed to every entry. An entry's own env: overrides these per key.
+	Env map[string]string `yaml:"env,omitempty"`
 	// EphemeralRetention is how long IPC-submitted one-off job entries
 	// (state + log dirs) are kept after their last run. Zero or unset
 	// disables auto-pruning. Configured jobs (those in jobs:) are never
@@ -102,6 +104,14 @@ type Job struct {
 	// Agent selects the agent provider for this job. Empty falls back to
 	// Defaults.Agent and then to DefaultAgent ("claude").
 	Agent string `yaml:"agent,omitempty"`
+
+	// Env is passed to the agent process and to pre_exec/post_exec for this
+	// entry, on top of the daemon's own environment. Values here override
+	// inherited ones. Use it for per-entry credentials the work needs (a model
+	// API key, say) that should not sit in the daemon's environment for
+	// everything else. Merged over defaults.env, so one key can be overridden
+	// without restating the rest.
+	Env map[string]string `yaml:"env,omitempty"`
 
 	// Resolved fields — populated after Validate.
 	cronExpr       string
@@ -508,6 +518,26 @@ func (c *Config) EffectiveAgent(j *Job) string {
 // EffectiveModel returns the model for a job, falling back to the global
 // default. Empty when neither is set — the agent provider picks its own
 // default in that case.
+// EffectiveEnv returns the environment for one entry: defaults.env with the
+// entry's own env: merged over it, so a single key can be overridden without
+// restating the others. Returns nil when neither sets anything, which callers
+// treat as "inherit the daemon's environment unchanged".
+func (c *Config) EffectiveEnv(j *Job) map[string]string {
+	if len(c.Defaults.Env) == 0 && (j == nil || len(j.Env) == 0) {
+		return nil
+	}
+	out := make(map[string]string, len(c.Defaults.Env)+len(j.Env))
+	for k, v := range c.Defaults.Env {
+		out[k] = v
+	}
+	if j != nil {
+		for k, v := range j.Env {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func (c *Config) EffectiveModel(j *Job) string {
 	if j.Model != "" {
 		return j.Model

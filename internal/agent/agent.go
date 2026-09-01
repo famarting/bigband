@@ -57,6 +57,9 @@ type Request struct {
 	// ExtraFlags is appended to the provider's constructed argv verbatim.
 	// Use sparingly — provider-specific syntax.
 	ExtraFlags []string
+	// Env is added to the agent subprocess's environment, on top of the
+	// daemon's own. Values here win. Nil means inherit unchanged.
+	Env map[string]string
 	// LogWriter receives the raw subprocess stream.
 	LogWriter io.Writer
 	// Live receives a pretty-rendered version of the run.

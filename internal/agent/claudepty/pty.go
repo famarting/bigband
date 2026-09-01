@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 
 	"github.com/creack/pty"
 )
@@ -44,13 +45,13 @@ func (s *ptySession) exited() bool {
 // output is consumed by a goroutine that copies to drain (set to io.Discard
 // when the caller doesn't want it persisted). The process is killed if ctx
 // fires before close is called.
-func startPty(ctx context.Context, command, workDir string, args []string, drain io.Writer) (*ptySession, error) {
+func startPty(ctx context.Context, command, workDir string, args []string, env map[string]string, drain io.Writer) (*ptySession, error) {
 	if drain == nil {
 		drain = io.Discard
 	}
 	c := exec.Command(command, args...)
 	c.Dir = workDir
-	c.Env = append(os.Environ(), "TERM=xterm-256color")
+	c.Env = envWith(append(os.Environ(), "TERM=xterm-256color"), env)
 	tty, err := pty.StartWithSize(c, &pty.Winsize{Cols: defaultPtyCols, Rows: defaultPtyRows})
 	if err != nil {
 		return nil, fmt.Errorf("start pty: %w", err)
@@ -119,4 +120,25 @@ func newSessionUUID() (string, error) {
 	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// envWith returns base plus the given overrides as KEY=VALUE pairs. Later
+// entries win in Go's exec, so appending is enough to override an inherited
+// value. Keys are sorted so the resulting slice is deterministic, which keeps
+// it comparable in tests.
+func envWith(base []string, extra map[string]string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(base)+len(keys))
+	out = append(out, base...)
+	for _, k := range keys {
+		out = append(out, k+"="+extra[k])
+	}
+	return out
 }

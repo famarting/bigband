@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"sort"
 	"syscall"
 	"time"
 
@@ -47,6 +48,11 @@ func (provider) Run(ctx context.Context, req agent.Request) (agent.Result, error
 
 	c := exec.CommandContext(ctx, binary, buildArgs(req)...)
 	c.Dir = req.WorkDir
+	// Nil Env inherits the daemon's environment; only set it when the entry
+	// asks for additions, so the default path stays untouched.
+	if len(req.Env) > 0 {
+		c.Env = envWithClaude(os.Environ(), req.Env)
+	}
 	// Raw NDJSON is discarded once parsed: plain rendering goes to the log,
 	// colorized rendering to live (when live is a TTY).
 	sw := newStreamWriter(io.Discard, log, live, isTerminal(live))
@@ -120,4 +126,25 @@ func isTerminal(w io.Writer) bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// envWith returns base plus the given overrides as KEY=VALUE pairs. Later
+// entries win in Go's exec, so appending is enough to override an inherited
+// value. Keys are sorted so the resulting slice is deterministic, which keeps
+// it comparable in tests.
+func envWithClaude(base []string, extra map[string]string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+	keys := make([]string, 0, len(extra))
+	for k := range extra {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(base)+len(keys))
+	out = append(out, base...)
+	for _, k := range keys {
+		out = append(out, k+"="+extra[k])
+	}
+	return out
 }
